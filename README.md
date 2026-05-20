@@ -1,374 +1,429 @@
 # mega_agent
 
-> 单文件、可教学、可运行的 Claude Code 风格 Agent 内核 —— 把 s0–s19 教程系列的所有能力(权限闸 / 钩子 / 重试预算 / 任务图 / Worktree 隔离 / 后台任务 + Cron / 多 Agent 团队 / MCP / LLM Gateway / 加密 Profile / 路由)整合到一个 ~1700 行的 Python 文件里。
+> Production-grade Agent runtime kernel — bring your own LLM key, tools, and business logic.
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
----
+`mega_agent` is a **layered, replaceable, batteries-included** Python package that turns an LLM into a real agent: tool calling, permission gating, error self-healing, task isolation, scheduling, encrypted credentials, and MCP plugin support — all in 13 small modules you can read in an afternoon.
 
-## 目录
-
-- [它是什么](#它是什么)
-- [架构总览(L0–L7)](#架构总览-l0l7)
-- [安装](#安装)
-- [5 分钟跑起来](#5-分钟跑起来)
-- [配置:Profiles & Routing](#配置profiles--routing)
-- [REPL 命令](#repl-命令)
-- [环境变量](#环境变量)
-- [运行时目录](#运行时目录)
-- [常见用法示例](#常见用法示例)
-- [安全:Profile 加密](#安全profile-加密)
-- [扩展开发](#扩展开发)
-- [故障排查](#故障排查)
-- [License](#license)
+It is **not** another wrapper that ties you to one vendor. It is a kernel: pick your LLM, register your tools, embed it into your service.
 
 ---
 
-## 它是什么
+## Highlights
 
-`mega_agent.py` 是一个**用于教学和实验**的 Agent 内核,把"Claude Code"风格的能力做成了**单文件可读**、**逐层叠加**的最小实现:
-
-- 内置 **29 个原生工具**(read/write/edit/grep/glob/bash/...)
-- 一套 **能力权限闸**(read/write/exec 三类粒度,auto/strict 两种模式)
-- 可插拔的 **PreToolUse / PostToolUse 钩子**
-- **重试预算** + **审计日志**
-- **任务图**(DAG)+ **Git Worktree 隔离**(并行子任务互不串改)
-- **后台任务 + Cron** 调度
-- **多 Agent 团队**(协作 / 评审)
-- **MCP** 工具桥接
-- **LLM Gateway 适配层**:同一套代码可对接 Anthropic / OpenAI / 任意兼容网关 / Mock
-- **加密 Profile + 路由表**:多模型多 API Key 配置化管理,支持 `@code 写一段 Python` 这种按路由派发
-
-> 它**不是**生产级 Agent 框架。它的目标是:把 Agent 系统每一层的本质用最少的代码讲清楚,便于二次开发或学习。
+- **Drop-in embed** — `from mega_agent import agent_loop`, three lines and you're running.
+- **Vendor-neutral** — `anthropic` SDK, any OpenAI-compatible gateway (OpenAI / LiteLLM / OpenRouter / vLLM / your own), or a deterministic `mock` backend for tests.
+- **29 native tools** — file IO, shell, task graph, git worktree, background runner, cron, multi-agent inbox.
+- **Encrypted profile store** — Fernet + PBKDF2-HMAC-SHA256 (200,000 iterations); zero-config plaintext fallback for dev.
+- **Semantic routing** — `@code` → Claude, `@write` → GPT-4o, default → in-house gateway.
+- **Three-state permission gate** — `allow / ask / deny`, classified by tool name and command shape.
+- **Errors are observations** — failed tool calls become `is_error=True` results so the LLM can choose another path, not crash.
+- **Retry budget** — tools that fail N times in a row are auto-disabled and the LLM is told.
+- **MCP support** — connect any MCP server with one line: `mcp.register("server", ["cmd"])`.
 
 ---
 
-## 架构总览 (L0–L7)
+## Architecture
 
-| 层 | 名称 | 关键能力 | 对应教程 |
-|---|---|---|---|
-| L0 | **Kernel** | 工具注册表、ToolUse 解析、推理主循环 | s0–s5 |
-| L1 | **Permissions** | 能力分类 + auto/strict 模式 + 路径白名单 | s6 |
-| L2 | **Hooks** | PreToolUse / PostToolUse,可改写参数 / 拦截 | s7 |
-| L3 | **Retry & Audit** | 重试预算、JSONL 审计日志、事件总线 | s8 |
-| L4 | **Task Graph + Worktree** | DAG 调度 + 每节点独立 git worktree | s12, s18 |
-| L5 | **Background + Cron** | 异步任务 + 简版 cron 表达式 | s14 |
-| L6 | **Teams** | 多 Agent 协作、评审者模式 | s16 |
-| L7 | **MCP + Gateway + Profiles** | MCP 桥接 + LLM 多后端 + 加密 Profile/Routing | s17, s19 |
+```mermaid
+flowchart TB
+    subgraph User
+      U[Your service / CLI / queue worker]
+    end
+
+    subgraph Kernel["L0  Kernel - agent_loop"]
+      K[main loop]
+      DR[drain external signals]
+      EX[exec tool]
+    end
+
+    subgraph LLM["L0.5  LLM Adapter"]
+      F[make_llm_client]
+      A[AnthropicAdapter]
+      G[GatewayAdapter<br/>OpenAI-compatible]
+      M[MockAdapter]
+    end
+
+    subgraph Layers["L1 - L7  Cross-cutting layers"]
+      P[L1 Permissions<br/>allow/ask/deny]
+      H[L2 Hooks + Memory]
+      R[L3 Retry Budget]
+      T[L4 Task Graph]
+      W[L4 Worktree]
+      B[L5 Background + Cron]
+      TM[L6 Teams + Inbox]
+      MC[L7 MCP Registry]
+      PR[L7 Profile Store<br/>Fernet/PBKDF2]
+    end
+
+    subgraph Tools["Native Tools  29x"]
+      TOOLS[bash / read / write / edit<br/>create_task / worktree_*<br/>background_run / cron_*<br/>spawn / send_message / ...]
+    end
+
+    subgraph External
+      LLMSVC[(LLM provider)]
+      MCPSVR[(MCP servers)]
+      FS[(Filesystem<br/>.tasks/ .worktrees/<br/>.team/ etc.)]
+    end
+
+    U -->|prompt| K
+    K --> DR
+    DR -->|inject tags| K
+    K -->|complete| F
+    F --> A & G & M
+    A & G --> LLMSVC
+    K -->|tool_use| EX
+    EX --> P
+    P -->|allowed| H
+    H --> TOOLS
+    H --> MC
+    MC --> MCPSVR
+    EX --> R
+    TOOLS --> T & W & B & TM
+    T & W & B & TM --> FS
+    PR -.->|chooses backend| F
+    EX -->|tool_result| K
+```
+
+**Flow in one sentence:** every prompt enters the kernel, the kernel asks an `LLMClient` for the next action, dispatches any `tool_use` block through the permission gate and hook chain into either a native handler or an MCP server, captures the result (success *or* error) as a `tool_result`, then loops until the LLM emits `end_turn`.
+
+### Module map
+
+| File | Layer | Responsibility |
+|---|---|---|
+| `config.py` | — | Path layout + env vars + git root detection |
+| `events.py` | — | Append-only JSONL event bus, shared across all layers |
+| `permissions.py` | L1 | Capability gate, three-state decision |
+| `hooks.py` | L2 | Synchronous in-process hook bus + memory + system prompt |
+| `retry.py` | L3 | Per-tool failure budget with auto-disable |
+| `tasks.py` | L4 | DAG task store (one JSON file per task) |
+| `worktree.py` | L4 | Git-worktree wrapper with task binding |
+| `background.py` | L5 | Background subprocess runner + priority queue + cron |
+| `teams.py` | L6 | Multi-agent inbox + protocol request ledger |
+| `mcp.py` | L7 | Stdio + JSON-RPC 2.0 MCP client/registry |
+| `profiles.py` | L7 | Encrypted profile store + routing table |
+| `llm/` | L0.5 | LLMClient protocol + 3 adapters + factory |
+| `tools.py` | — | 29 native tool handlers + schema builder |
+| `kernel.py` | L0 | The agent loop |
+| `cli.py` | — | Reference REPL |
 
 ---
 
-## 安装
-
-### 1. 克隆 & 装依赖
+## Install
 
 ```bash
 git clone https://github.com/wangxfholly/agent_basic.git
 cd agent_basic
-python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-依赖说明:
+Requirements (Python 3.10+):
 
-| 包 | 何时需要 |
+| Package | Required when |
 |---|---|
-| `anthropic` | 直连 Anthropic API(`protocol=anthropic`) |
-| `openai` | 走 OpenAI 或任何 OpenAI 兼容网关(`protocol=openai`) |
-| `cryptography` | 启用 Profile 加密(设置了 `AGENT_MASTER_PASSWORD`) |
+| `anthropic` | Using the `anthropic` protocol |
+| `openai` | Using the `openai` protocol (covers ANY OpenAI-compatible gateway) |
+| `cryptography` | `AGENT_MASTER_PASSWORD` is set (encrypted profile store) |
 
-如果只用其中一个协议,可以只装对应的 SDK。
-
-### 2. 系统要求
-
-- Python ≥ **3.10**
-- `git` 命令行(任务图 + worktree 需要)
-- 一个有效的 LLM API Key
+Install only what you need; the others stay as soft imports.
 
 ---
 
-## 5 分钟跑起来
+## Quick start
 
-最小配置:用环境变量直接接 Anthropic 官方 API,无需 Profile。
+### Option A — REPL
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-xxxxx
-export AGENT_LLM_BACKEND=anthropic        # 默认就是这个
-export AGENT_MODEL=claude-sonnet-4-20250514
-
-python3 mega_agent.py
+python -m mega_agent
 ```
-
-启动后看到:
 
 ```
 == mega_agent ==
-WORKDIR   = /your/path
-REPO_ROOT = /your/path
+WORKDIR   = /your/cwd
 tools     = 29 native + 0 mcp
 secrets   = DISABLED (plaintext)
 profile   = (none — use /add-profile or env)
-models    = /your/path/models.json
-commands  : /profiles  /use <name>  /add-profile  /rm-profile <name>
-            /routes  /route <name> <profile>  /rm-route <name>
-            /perm <auto|strict>  /quit
-syntax    : '@<route> <prompt>'  → run with routed model
-you>
+you> list files in this dir and tell me how many
 ```
 
-试一下:
-
-```text
-you> 列出当前目录的文件,然后把 README.md 的标题打印出来
-```
-
----
-
-## 配置:Profiles & Routing
-
-如果你要管理 **多个 API Key + 多个模型 + 多个网关**,推荐用内置的 Profile 系统替代环境变量。
-
-### 概念
-
-- **Profile** = `{name, protocol, model, base_url, api_key}`,即"一组完整的连接配置"
-- **Routing** = `{语义名 → profile 名}`,例如 `code → claude-sonnet`、`write → gpt-4o`
-- **Active Profile** = 默认使用的 profile(`/use <name>` 切换)
-
-### 添加第一个 Profile
-
-```text
-you> /add-profile
-  name      : claude
-  protocol  [anthropic|openai|mock]: anthropic
-  model     : claude-sonnet-4-20250514
-  base_url  (empty=default):
-  api_key   : sk-ant-xxxxxxx
-saved → /your/path/models.json
-
-you> /use claude
-active profile = claude (anthropic / claude-sonnet-4-20250514)
-```
-
-### 加一个走 OpenAI 兼容网关的 Profile
-
-```text
-you> /add-profile
-  name      : gpt4o
-  protocol  [anthropic|openai|mock]: openai
-  model     : gpt-4o
-  base_url  : https://your-gateway.example.com/v1
-  api_key   : sk-xxxxxxxx
-```
-
-> `protocol=openai` 时,任何**实现了 OpenAI Chat Completions 协议**的网关都能用(LiteLLM、One API、Together、Groq、自建 vLLM 等)。
-
-### 配置路由表
-
-让"写代码"和"写文章"用不同模型:
-
-```text
-you> /route code   claude
-you> /route write  gpt4o
-you> /route default claude
-you> /routes
-  code            → claude
-  write           → gpt4o
-  default         → claude
-```
-
-### 按路由调用
-
-```text
-you> @code 帮我写个 Python 装饰器,统计函数耗时
-you> @write 帮我润色一下 README 的引言
-you> 普通问题不带 @ 前缀,会用 active profile
-```
-
----
-
-## REPL 命令
-
-| 命令 | 作用 |
-|---|---|
-| `/profiles` | 列出所有 profile,`*` 标记 active |
-| `/use <name>` | 切换 active profile |
-| `/add-profile` | 交互式添加 profile(name / protocol / model / base_url / api_key) |
-| `/rm-profile <name>` | 删除 profile |
-| `/routes` | 列出路由表 |
-| `/route <name> <profile>` | 设置路由,如 `/route code claude` |
-| `/rm-route <name>` | 删除路由 |
-| `/perm auto` / `/perm strict` | 切换权限模式 |
-| `/backend anthropic\|openai\|mock` | 临时切换 LLM 后端(覆盖 profile) |
-| `@<route> <prompt>` | 按路由派发,如 `@code 写个二分查找` |
-| `/quit` / `/exit` | 退出 |
-
----
-
-## 环境变量
-
-| 变量 | 默认 | 说明 |
-|---|---|---|
-| `AGENT_WORKDIR` | `.` | Agent 的工作目录 |
-| `AGENT_MODEL` | `claude-sonnet-4-20250514` | 没有 profile 时使用的默认模型 |
-| `AGENT_MAX_ITERS` | `50` | Agent loop 最大轮数 |
-| `AGENT_PERM_MODE` | `auto` | 权限模式 `auto` / `strict` |
-| `AGENT_RETRY_THRESHOLD` | `3` | 同一工具失败几次后熔断 |
-| `AGENT_LLM_BACKEND` | `anthropic` | 默认 LLM 后端,可选 `anthropic` / `openai` / `mock` |
-| `AGENT_LLM_PROFILE` | _(空)_ | 启动时要激活的 profile 名 |
-| `AGENT_GATEWAY_BASE_URL` | _(空)_ | OpenAI 兼容网关地址(也接受 `OPENAI_BASE_URL`) |
-| `AGENT_GATEWAY_API_KEY` | _(空)_ | 网关 API Key(也接受 `OPENAI_API_KEY`) |
-| `ANTHROPIC_API_KEY` | _(空)_ | Anthropic 官方 Key |
-| `AGENT_MASTER_PASSWORD` | _(空)_ | **设置后启用 Profile 加密**(详见下方安全章节) |
-
-> 优先级:`@route` > `/use` 选定的 active profile > `AGENT_LLM_PROFILE` > 环境变量 fallback
-
----
-
-## 运行时目录
-
-启动后会在工作目录生成以下文件 / 目录(全部已加入 `.gitignore`):
-
-| 路径 | 用途 |
-|---|---|
-| `models.json` | 明文 Profile 存储(未启用加密时) |
-| `models.json.enc` | 加密 Profile 存储(启用加密时) |
-| `.master-key.salt` | 加密用的 PBKDF2 salt |
-| `.tasks/` | 任务图节点状态 |
-| `.worktrees/` | 子任务的 git worktree 副本 |
-| `.team/` | 多 Agent 团队协作产物 |
-| `.runtime-tasks/` | 后台任务记录 |
-| `.cron/` | Cron 触发器状态 |
-| `CLAUDE.md` | 用户个性化记忆(可选) |
-| `.hooks.json` | 用户自定义钩子配置 |
-
----
-
-## 常见用法示例
-
-### 1. 让 Agent 改代码 + 跑测试 + 提交
-
-```text
-you> 把 src/util.py 里的 add 函数加上类型注解,然后运行 pytest,如果通过就 git commit
-```
-
-Agent 会自动:read → edit → bash(pytest) → bash(git commit)。每一步都受权限闸约束。
-
-### 2. 切到严格模式审视危险操作
-
-```text
-you> /perm strict
-perm mode = strict
-you> 删掉 /tmp 下所有文件
-[permission] denied: bash 'rm -rf /tmp/*' requires confirmation in strict mode
-```
-
-### 3. 跨模型协作
-
-```text
-you> /route code claude
-you> /route review gpt4o
-you> @code 写一个 LRU 缓存的 Python 实现
-... (claude 输出)
-you> @review 评审上面那段代码,指出潜在问题
-... (gpt4o 输出)
-```
-
-### 4. 同时管理多个 API Key
-
-```text
-you> /add-profile        # 个人账号 OpenAI Key
-you> /add-profile        # 公司账号 Azure Key
-you> /add-profile        # 自建 vLLM 网关
-you> /profiles
-   personal-gpt   openai     gpt-4o                key=sk-...
- * company-azure  openai     gpt-4-turbo           key=ak-...
-   self-vllm     openai     llama-3.1-70b         key=local
-```
-
----
-
-## 安全:Profile 加密
-
-默认 `models.json` 是明文存的。如果你要把仓库 / 备份 / 同步到不可信环境,**强烈建议启用加密**。
-
-### 启用
-
-```bash
-export AGENT_MASTER_PASSWORD='your strong passphrase'
-python3 mega_agent.py
-```
-
-启动时:
-
-- 旧的 `models.json`(明文)会**自动迁移**为 `models.json.enc`(密文)
-- 明文文件被删除
-- 后续读写全部走 Fernet 对称加密(PBKDF2-HMAC-SHA256, 200,000 轮, 16 字节 salt)
-
-启动横幅会变成:
-
-```
-secrets   = ENABLED (Fernet/PBKDF2)
-models    = /your/path/models.json.enc
-```
-
-### 注意
-
-- 密码错了会直接拒绝启动,不会破坏密文
-- `.master-key.salt` 必须和 `.enc` 文件**保持一对**,丢了等于丢密钥
-- 二者**都已经在 `.gitignore` 中**,不会被误提交
-- 想换密码?先用旧密码启动 → `/profiles` 看一遍内容 → 退出 → 改 `AGENT_MASTER_PASSWORD` → 删掉 `.enc` 和 `salt` → 重启 → `/add-profile` 重新填一遍
-
----
-
-## 扩展开发
-
-### 加一个新工具
-
-在 `mega_agent.py` 里搜 `TOOL_HANDLERS = {`,照已有工具的 schema 加一个就行:
+### Option B — Embed in your service
 
 ```python
-@register_tool(
-    name="my_tool",
-    description="...",
-    input_schema={...},
-    capabilities=["read"],   # 或 ["write"], ["exec"]
-)
-def my_tool(input: dict) -> str:
-    ...
+from mega_agent import agent_loop
+
+def handle_request(prompt: str) -> str:
+    msgs = agent_loop(prompt)
+    last = msgs[-1]["content"]
+    return "\n".join(
+        b.text for b in last
+        if getattr(b, "type", None) == "text"
+    )
 ```
 
-### 加一个新 LLM 后端
+That's it. `agent_loop` is thread-safe; state persists in `.tasks/`, `.worktrees/`, etc. under `AGENT_WORKDIR`.
 
-继承 `LLMClient` 抽象类,实现 `complete(messages, tools, system) -> LLMResponse`,然后在 `make_llm_client()` 的分支里加一支即可。
+See [`examples/`](examples/) for runnable scripts:
 
-### 加一个 PreToolUse 钩子
+| File | Demonstrates |
+|---|---|
+| [`01_quickstart.py`](examples/01_quickstart.py) | Minimal embed |
+| [`02_custom_tool.py`](examples/02_custom_tool.py) | Register your own business tools |
+| [`03_hooks.py`](examples/03_hooks.py) | Audit / metering / compliance via hooks |
+| [`04_routing.py`](examples/04_routing.py) | Multi-profile + semantic routing programmatically |
+| [`05_mock_test.py`](examples/05_mock_test.py) | Deterministic unit tests with `MockAdapter` |
 
-在 `.hooks.json` 里写:
+---
+
+## Configuring LLM backends
+
+### One key, one model (env-only)
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-xxx
+# or for any OpenAI-compatible gateway:
+export AGENT_LLM_BACKEND=gateway
+export AGENT_GATEWAY_BASE_URL=https://api.openai.com/v1
+export AGENT_GATEWAY_API_KEY=sk-xxx
+export AGENT_MODEL=gpt-4o
+```
+
+### Multiple keys + routing (recommended for prod)
+
+```bash
+export AGENT_MASTER_PASSWORD='choose a strong passphrase'
+python -m mega_agent
+```
+
+In the REPL:
+
+```
+you> /add-profile
+  name      : claude
+  protocol  : anthropic
+  model     : claude-sonnet-4-20250514
+  api_key   : sk-ant-xxx
+
+you> /add-profile
+  name      : gpt4o
+  protocol  : openai
+  base_url  : https://api.openai.com/v1
+  api_key   : sk-xxx
+  model     : gpt-4o
+
+you> /route code claude
+you> /route write gpt4o
+you> /route default claude
+
+you> @code   write me a binary search in Python
+you> @write  rewrite the comments above in plain English
+you> a generic question goes through the default route
+```
+
+Profiles are persisted to `models.json.enc` (Fernet ciphertext) when `AGENT_MASTER_PASSWORD` is set, otherwise to `models.json` (plaintext, with a one-time warning).
+
+---
+
+## Adding your own tools
+
+Three lines:
+
+```python
+from mega_agent import TOOL_HANDLERS, agent_loop
+
+def query_user(inp: dict) -> dict:
+    return my_db.fetch_user(inp["user_id"])
+
+TOOL_HANDLERS["query_user"] = query_user
+
+agent_loop("Look up user u123 and summarise their recent activity.")
+```
+
+The kernel picks up the new handler the next time `build_tool_schemas()` runs (which is once per `agent_loop` call). The LLM sees `query_user` automatically.
+
+For a richer schema (so the LLM knows the parameters), see the inline notes in [`mega_agent/tools.py`](mega_agent/tools.py).
+
+---
+
+## Cross-cutting via hooks
+
+Hooks run synchronously in the calling thread; ideal for audit logs, metering, rate limits, and PII scrubs. Events emitted by the kernel:
+
+| Event | Payload |
+|---|---|
+| `tool.before` | `{name, input, intent}` |
+| `tool.after` | `{name, intent, ok}` |
+| `tool.error` | `{name, intent, error}` |
+| `loop.iter` | `{iter, backend}` |
+
+Example:
+
+```python
+from mega_agent import hooks
+
+def audit(payload):
+    log.info("tool=%s risk=%s", payload["name"], payload["intent"]["risk"])
+
+hooks.on("tool.before", audit)
+```
+
+Full demo: [`examples/03_hooks.py`](examples/03_hooks.py).
+
+---
+
+## Permission model
+
+The gate classifies every call:
+
+| Risk | Trigger | `auto` mode | `strict` mode |
+|---|---|---|---|
+| `read` | Tool name starts with `read/list/get/show/search/query/inspect` | **allow** | **allow** |
+| `write` | Anything else not flagged below | **allow** | **ask** |
+| `high` | Tool starts with `delete/remove/drop/rm/kill/shutdown`, or bash contains `rm -rf` / `shutdown` / `mkfs` / `dd if=` | **ask** | **ask** |
+
+`ask` in non-interactive runs auto-denies. Wrap `kernel._exec_tool` or extend `cli.py` to plug in your own UI prompt and call `permissions.remember(name, "allow")` to whitelist.
+
+Programmatic overrides:
+
+```python
+from mega_agent import permissions
+permissions.allowlist.add("query_user")     # always allow
+permissions.denylist.add("shutdown_teammate")  # never run
+permissions.mode = "strict"                 # globally tighter
+```
+
+---
+
+## Reliability features
+
+### Errors are observations
+A tool that raises is *not* propagated out of `agent_loop`. The kernel converts the exception into:
 
 ```json
-[
-  {"event": "PreToolUse", "match": {"tool": "bash"}, "action": "deny",
-   "reason": "bash disabled by org policy"}
-]
+{"type": "tool_result", "is_error": true, "content": "ERROR: <msg>"}
 ```
 
+The LLM reads it on the next turn and decides whether to retry, change strategy, or surface the failure to the user.
+
+### Retry budget
+Each tool tracks its consecutive-failure count. After `AGENT_RETRY_THRESHOLD` (default 3) failures it is **disabled**, and the next user turn carries:
+
+```
+<retry-budget>tools temporarily disabled: bash,query_user</retry-budget>
+```
+
+Set the threshold via env:
+
+```bash
+export AGENT_RETRY_THRESHOLD=5
+```
+
+### Worktree isolation
+Spawn parallel subtasks without races:
+
+```
+you> create_task title="implement A"   → t1
+you> create_worktree name=feat-a task_id=t1
+you> run_in_worktree feat-a "pytest"
+you> worktree_closeout feat-a action=remove complete_task=true
+```
+
+Each worktree is a real `git worktree add`, on its own branch (`wt/<name>`). Multiple subagents can edit files in isolation; `worktree_closeout` either keeps or removes the branch and updates the bound task.
+
 ---
 
-## 故障排查
+## MCP plugins
 
-| 现象 | 原因 | 解决 |
+```python
+from mega_agent import mcp
+mcp.register("filesystem", ["mcp-server-filesystem", "/path/to/root"])
+mcp.register("github",     ["mcp-server-github"])
+```
+
+All registered tools appear automatically in `build_tool_schemas()` under names `mcp__<server>__<tool>`. The permission gate treats them like native tools (their risk is inferred from the name prefix).
+
+---
+
+## Configuration reference
+
+### Environment variables
+
+| Var | Default | Purpose |
 |---|---|---|
-| `ModuleNotFoundError: anthropic` | 没装 SDK | `pip install anthropic` |
-| `ModuleNotFoundError: cryptography` | 启用了加密但没装库 | `pip install cryptography` |
-| 启动报 `wrong password / corrupted file` | 密码错了 | 检查 `AGENT_MASTER_PASSWORD` |
-| `[llm] mock / mock-model` | 没配 Key,回退到 mock | 设置 API Key 或 `/use <profile>` |
-| `permission denied: write requires ...` | strict 模式下需要确认 | `/perm auto` 或在交互中确认 |
-| Worktree 创建失败 `Author identity unknown` | git 没设 user.name/email | `git config --global user.name "..."` |
-| `@code` 报 `unknown route` | 路由表没配 | `/route code <profile-name>` |
+| `AGENT_WORKDIR` | `.` | State root (`.tasks/`, `.worktrees/`, etc.) |
+| `AGENT_MODEL` | `claude-sonnet-4-20250514` | Default model when no profile is active |
+| `AGENT_MAX_ITERS` | `50` | Kernel loop safety cap |
+| `AGENT_PERM_MODE` | `auto` | `auto` \| `strict` |
+| `AGENT_RETRY_THRESHOLD` | `3` | Failures before auto-disable |
+| `AGENT_LLM_BACKEND` | `anthropic` | `anthropic` \| `gateway` \| `mock` (legacy fallback when no profile) |
+| `AGENT_LLM_PROFILE` | _(empty)_ | Profile to activate at startup |
+| `AGENT_GATEWAY_BASE_URL` | _(empty)_ | OpenAI-compatible gateway URL |
+| `AGENT_GATEWAY_API_KEY` | _(empty)_ | Gateway key |
+| `OPENAI_BASE_URL` / `OPENAI_API_KEY` | _(empty)_ | Accepted as fallback |
+| `ANTHROPIC_API_KEY` | _(empty)_ | Anthropic native key |
+| `AGENT_MASTER_PASSWORD` | _(empty)_ | **Set this to enable Fernet encryption of `models.json`** |
+
+### REPL commands
+
+| Command | Action |
+|---|---|
+| `/profiles` | List profiles (api_keys redacted) |
+| `/use <name>` | Switch active profile |
+| `/add-profile` | Interactive add (name / protocol / model / base_url / api_key) |
+| `/rm-profile <name>` | Delete |
+| `/routes` | Show routing table |
+| `/route <key> <profile>` | Map a semantic key to a profile |
+| `/rm-route <key>` | Drop a route |
+| `/perm auto\|strict` | Toggle permission mode |
+| `/backend anthropic\|gateway\|mock` | Override backend for new clients |
+| `@<route> <prompt>` | Dispatch this turn through a route |
+| `/quit` | Exit |
+
+### Runtime files (all in `.gitignore`)
+
+| Path | Description |
+|---|---|
+| `.tasks/` | Task graph nodes (one JSON per task) |
+| `.worktrees/` | Git-worktree checkouts + index |
+| `.runtime-tasks/` | Background-run archives |
+| `.cron/` | Cron job records |
+| `.team/` | Multi-agent inboxes + config |
+| `models.json` / `models.json.enc` | Profile store (plaintext or encrypted) |
+| `.master-key.salt` | PBKDF2 salt for the encrypted store |
+| `CLAUDE.md` | Project memory injected into the system prompt |
+| `.hooks.json` | User-defined hook declarations |
 
 ---
+
+## Extending
+
+| Goal | Where |
+|---|---|
+| New tool | `tools.py` → add handler + register on `TOOL_HANDLERS` |
+| New LLM backend | Subclass `LLMClient` in `mega_agent/llm/`, register in `factory.py` |
+| Audit / metering / rate-limit | `hooks.on("tool.before"/"tool.after"/"tool.error", ...)` |
+| Custom `ask` UI | Override `kernel._exec_tool`'s `ask` branch |
+| Different storage (Redis / DB) | Replace IO in `tasks.py` / `teams.py` |
+| Custom system prompt | Override `hooks.build_system_prompt()` or write `CLAUDE.md` |
+
+---
+
+## Design principles
+
+1. **Errors are observations.** Tool failures never crash the loop; they become `is_error=true` results the LLM can react to.
+2. **External signals converge into one channel.** Background results, inbox messages, and retry-budget alerts are injected as `<tag>...</tag>` blocks in the next user turn — there is exactly one input surface.
+3. **One file per record.** Tasks, inbox messages, background-run archives are individual JSON / JSONL — git-friendly, no merge hell.
+4. **Stdlib-only on the hot path.** Cron, task graph, event bus, MCP client all use only the standard library. SDK and crypto are soft imports.
+5. **Config via env + JSON.** No yaml, no toml. Anything that fits in a Kubernetes ConfigMap, Docker env, or Vault secret works directly.
+
+---
+
+## Status
+
+`v0.2.0` — actively used; API surface stable for the public exports listed in [`mega_agent/__init__.py`](mega_agent/__init__.py).
 
 ## License
 
-[MIT](LICENSE) © 2026 wangxfholly
+[MIT](LICENSE)
