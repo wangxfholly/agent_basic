@@ -1,0 +1,6 @@
+# Core LLM SDKs (pick one or both based on which profile/protocol you use)
+anthropic>=0.39.0
+openai>=1.40.0
+
+# Profile encryption (required when AGENT_MASTER_PASSWORD is set)
+cryptography>=42.0.0

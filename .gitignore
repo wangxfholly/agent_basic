@@ -1,0 +1,19 @@
+# mega_agent runtime state — never commit
+models.json
+models.json.enc
+.master-key.salt
+
+# state dirs
+.tasks/
+.worktrees/
+.team/
+.runtime-tasks/
+.cron/
+
+# memory & hooks (may contain user-specific notes)
+CLAUDE.md
+.hooks.json
+
+# python
+__pycache__/
+*.pyc
