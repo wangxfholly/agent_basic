@@ -67,9 +67,19 @@ flowchart TB
       T[L4 Task Graph]
       W[L4 Worktree]
       B[L5 Background + Cron]
-      TM[L6 Teams + Inbox]
       MC[L7 MCP Registry]
       PR[L7 Profile Store<br/>Fernet/PBKDF2]
+    end
+
+    subgraph Teams["L6 Teams / 子 Agent 协作层"]
+      TM[TeammateManager<br/>spawn / shutdown]
+      MB[MessageBus<br/>JSONL inbox]
+      RS[RequestStore<br/>approve / result]
+      subgraph Subs["Sub-Agents / 子 Agent"]
+        SA1[coder]
+        SA2[reviewer]
+        SA3[planner]
+      end
     end
 
     subgraph Tools["Native Tools 29x"]
@@ -79,7 +89,7 @@ flowchart TB
     subgraph External["External / 外部"]
       LLMSVC[(LLM provider)]
       MCPSVR[(MCP servers)]
-      FS[(Filesystem<br/>.tasks/ .worktrees/<br/>.team/ etc.)]
+      FS[(Filesystem<br/>.tasks/ .worktrees/<br/>.team/ .requests/ etc.)]
     end
 
     U -->|prompt| K
@@ -96,7 +106,12 @@ flowchart TB
     MC --> MCPSVR
     EX --> R
     TOOLS --> T & W & B & TM
-    T & W & B & TM --> FS
+    TM <-->|spawn / shutdown| Subs
+    Subs <-->|messages| MB
+    Subs <-->|protocol| RS
+    Subs -.->|autonomous claim| T
+    MB -->|inject inbox| DR
+    T & W & B & TM & MB & RS --> FS
     PR -.->|chooses backend| F
     EX -->|tool_result| K
 ```
@@ -356,6 +371,55 @@ you> worktree_closeout feat-a action=remove complete_task=true
 **EN —** Each worktree is a real `git worktree add`, on its own branch (`wt/<name>`). Multiple subagents can edit files in isolation; `worktree_closeout` either keeps or removes the branch and updates the bound task.
 
 **中文 —** 每个 worktree 都是真实的 `git worktree add`,独立分支(`wt/<name>`)。多个子 Agent 可以在文件层面互不干扰;`worktree_closeout` 可选保留或删除分支,并同步更新绑定任务。
+
+---
+
+## 👥 Multi-agent / 子 Agent 协作
+
+**EN —** Built-in lead-and-teammates pattern. The lead (your `agent_loop` caller) spawns sub-agents on background threads; each has its own role, JSONL inbox, and optional autonomous task-claiming behaviour.
+
+**中文 —** 内置主-从多 Agent 协作模式。主 Agent(你的 `agent_loop` 调用方)在后台线程拉起子 Agent;每个子 Agent 有自己的角色、JSONL 收件箱,可选自主任务认领能力。
+
+### Tools / 工具
+
+| Tool | EN | 中文 |
+|---|---|---|
+| `spawn` | Start a teammate by name + role (+ `autonomous` flag) | 按 name + role 启动一个子 Agent(可选 `autonomous`) |
+| `list_teammates` | List all teammates and their status | 列出所有子 Agent 及其状态 |
+| `send_message` | Send a typed message to a teammate's inbox | 投递一条带类型的消息到指定收件箱 |
+| `read_my_inbox` | Drain the caller's inbox (destructive read) | 拉取并清空自己的收件箱 |
+| `shutdown_teammate` | Stop a teammate gracefully | 优雅关闭某个子 Agent |
+
+### Message types / 消息类型
+
+`chat` · `result` · `shutdown_request` · `shutdown_response` · `plan_approval` · `plan_approval_response`
+
+**EN —** Unknown types are rejected at the bus to prevent protocol drift. Inbox messages addressed to the lead are auto-injected into the next user turn as `<inbox>...</inbox>` tags — same single input surface as background results and retry-budget alerts.
+
+**中文 —** 未知类型在总线层直接拒收,防止协议漂移。投给主 Agent 的收件箱消息会以 `<inbox>...</inbox>` 标签自动注入下一轮用户消息 —— 与后台结果、重试预算告警共用同一个输入面。
+
+### Pattern / 典型用法
+
+```
+spawn name=coder    role=implement  autonomous=true
+spawn name=reviewer role=review     autonomous=true
+
+create_task title="implement search"           → t1
+create_task title="review t1" deps=[t1]        → t2
+
+# autonomous teammates claim matching tasks themselves
+# coder picks t1 → works in worktree wt/feat-search
+# reviewer waits for t1 done → claims t2
+
+send_message to=coder type=chat body={"hint":"use prefix tree"}
+read_my_inbox who=lead   # drain replies
+```
+
+### Cross-agent protocol / 跨 Agent 协议
+
+**EN —** `RequestStore` (`.requests/<rid>.json`) tracks open requests with state machine `open → approved/rejected → done`. Use it for plan approvals, async results, or any request that needs a durable handshake.
+
+**中文 —** `RequestStore`(`.requests/<rid>.json`)维护持久化请求账本,状态机 `open → approved/rejected → done`。适合方案审批、异步结果回执等需要可恢复握手的场景。
 
 ---
 
