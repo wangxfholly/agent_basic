@@ -31,6 +31,7 @@ import traceback
 
 sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 
+from mega_agent import skill_market  # noqa: E402
 from mega_agent.skills import skills  # noqa: E402
 
 
@@ -89,6 +90,78 @@ def _tools() -> list[dict]:
             "description": "Re-scan the skill search dirs. Returns the new count.",
             "inputSchema": {"type": "object", "properties": {}},
         },
+        {
+            "name": "install_skill",
+            "description": (
+                "Install a skill from a git+ URL, http(s) tarball, or local "
+                "directory. Pipeline: parse → policy → fetch → verify "
+                "(SKILL.md / sha256 / optional Ed25519 sig) → atomic commit. "
+                "Never executes skill scripts during install."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string"},
+                    "sha256": {"type": ["string", "null"]},
+                    "force": {"type": "boolean", "default": False},
+                    "allow_unsigned": {"type": ["boolean", "null"]},
+                    "require_signature": {"type": ["boolean", "null"]},
+                    "insecure": {"type": "boolean", "default": False},
+                },
+                "required": ["source"],
+            },
+        },
+        {
+            "name": "remove_skill",
+            "description": "Uninstall a skill (optionally pin a single version).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "version": {"type": ["string", "null"]},
+                },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": "list_installed_skills",
+            "description": "Return the lockfile contents (every installed skill).",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "verify_installed_skill",
+            "description": "Re-hash on-disk skill trees vs lockfile (integrity check).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"name": {"type": ["string", "null"]}},
+            },
+        },
+        {
+            "name": "sync_skills",
+            "description": "Reproduce installs from the lockfile (CI / new-machine).",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "pin_skill",
+            "description": "Pin a skill name to a specific installed version (or unpin with null).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "version": {"type": ["string", "null"]},
+                },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": "skill_versions",
+            "description": "List all installed versions of a skill name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        },
     ]
 
 
@@ -107,6 +180,27 @@ def _dispatch(name: str, args: dict) -> dict:
         )
     if name == "refresh_skills":
         return {"count": skills.refresh()}
+    if name == "install_skill":
+        return skill_market.install(
+            args["source"],
+            sha256=args.get("sha256"),
+            force=args.get("force", False),
+            allow_unsigned=args.get("allow_unsigned"),
+            require_signature=args.get("require_signature"),
+            insecure=args.get("insecure", False),
+        )
+    if name == "remove_skill":
+        return skill_market.remove(args["name"], version=args.get("version"))
+    if name == "list_installed_skills":
+        return skill_market.list_installed()
+    if name == "verify_installed_skill":
+        return skill_market.verify_installed(name=args.get("name"))
+    if name == "sync_skills":
+        return skill_market.sync()
+    if name == "pin_skill":
+        return {"pinned": skills.pin(args["name"], args.get("version"))}
+    if name == "skill_versions":
+        return {"versions": skills.all_versions(args["name"])}
     raise ValueError(f"unknown tool: {name}")
 
 

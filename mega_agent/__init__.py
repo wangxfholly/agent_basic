@@ -45,6 +45,13 @@ from .memory import (
 from .permissions import CapabilityPermissionGate, permissions
 from .profiles import ProfileStore, SecretBox, profiles, secrets
 from .retry import RetryBudget, retry_budget
+from .skill_market import (
+    install as install_skill,
+    list_installed as list_installed_skills,
+    remove as remove_skill,
+    sync as sync_skills,
+    verify_installed as verify_installed_skill,
+)
 from .skills import (
     SkillManifest,
     SkillRegistry,
@@ -78,6 +85,8 @@ __all__ = [
     "MemoryStore", "VectorBackend", "NaiveBackend", "MockBackend", "ChromaBackend",
     "SkillRegistry", "SkillManifest",
     "render_skill_catalog_block", "render_active_skills_block",
+    "install_skill", "remove_skill", "list_installed_skills",
+    "verify_installed_skill", "sync_skills",
     # tools
     "TOOL_HANDLERS", "build_tool_schemas", "normalize_tool_result",
     # prompt

@@ -59,6 +59,15 @@ DEFAULT_SKILL_DIRS: list[Path] = [
 ]
 
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$")
+
+
+def _semver_key(v: str) -> tuple[int, int, int]:
+    """Compare key for SemVer; non-conforming versions sort to (-1,-1,-1)."""
+    m = SEMVER_RE.match(v or "")
+    if not m:
+        return (-1, -1, -1)
+    return tuple(int(g) for g in m.groups())  # type: ignore[return-value]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,6 +81,9 @@ class SkillManifest:
     dir: Path
     allowed_tools: list[str] = field(default_factory=list)
     auto_load: bool = False
+    version: str = "0.0.0"
+    source: str | None = None
+    sha256: str | None = None
 
     def to_catalog_entry(self) -> dict:
         return {
@@ -80,6 +92,8 @@ class SkillManifest:
             "auto_load": self.auto_load,
             "allowed_tools": list(self.allowed_tools),
             "dir": str(self.dir),
+            "version": self.version,
+            "source": self.source,
         }
 
     def list_resources(self) -> dict:
@@ -156,13 +170,21 @@ class SkillRegistry:
         self.search_dirs = [Path(p) for p in (search_dirs or DEFAULT_SKILL_DIRS)]
         self._lock = threading.Lock()
         self._skills: dict[str, SkillManifest] = {}
+        self._all_versions: dict[str, list[SkillManifest]] = {}
         self._loaded: dict[str, str] = {}   # name → body (active in this run)
         self.refresh()
 
     # ---- discovery ----
     def refresh(self) -> int:
-        """Re-scan all search dirs. Later dirs do NOT override earlier names."""
-        found: dict[str, SkillManifest] = {}
+        """Re-scan all search dirs.
+
+        Multiple versions of the same skill may live side-by-side
+        (e.g. ``csv-analyst@0.3.1`` and ``csv-analyst@0.4.0``). We pick
+        the highest SemVer per name, unless `pin` forces a specific one.
+        Earlier search dirs still win on ties (project-local before
+        user-level).
+        """
+        candidates: dict[str, list[SkillManifest]] = {}
         for root in self.search_dirs:
             if not root.is_dir():
                 continue
@@ -170,13 +192,60 @@ class SkillRegistry:
                 if not child.is_dir():
                     continue
                 manifest = self._load_manifest(child)
-                if manifest and manifest.name not in found:
-                    found[manifest.name] = manifest
+                if manifest:
+                    candidates.setdefault(manifest.name, []).append(manifest)
+
+        pins = self._load_pins()
+        chosen: dict[str, SkillManifest] = {}
+        for name, versions in candidates.items():
+            pinned = pins.get(name)
+            if pinned:
+                hit = next((v for v in versions if v.version == pinned), None)
+                if hit:
+                    chosen[name] = hit
+                    continue
+            # highest SemVer; stable tie-break by dir name
+            versions.sort(key=lambda m: (_semver_key(m.version), str(m.dir)),
+                          reverse=True)
+            chosen[name] = versions[0]
+
         with self._lock:
-            self._skills = found
-        events.emit("skills.refresh", count=len(found),
+            self._skills = chosen
+            self._all_versions = candidates
+        events.emit("skills.refresh", count=len(chosen),
                     dirs=[str(p) for p in self.search_dirs])
-        return len(found)
+        return len(chosen)
+
+    def _pins_path(self) -> Path:
+        return Path.home() / ".mega" / "skills.pin.json"
+
+    def _load_pins(self) -> dict[str, str]:
+        p = self._pins_path()
+        if not p.is_file():
+            return {}
+        try:
+            import json
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def pin(self, name: str, version: str | None) -> dict:
+        """Pin (or unpin if version is None) a skill to a specific version."""
+        import json
+        p = self._pins_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        pins = self._load_pins()
+        if version is None:
+            pins.pop(name, None)
+        else:
+            pins[name] = version
+        p.write_text(json.dumps(pins, indent=2), encoding="utf-8")
+        self.refresh()
+        return pins
+
+    def all_versions(self, name: str) -> list[str]:
+        with self._lock:
+            return [m.version for m in self._all_versions.get(name, [])]
 
     def _load_manifest(self, skill_dir: Path) -> SkillManifest | None:
         md = skill_dir / "SKILL.md"
@@ -185,7 +254,7 @@ class SkillRegistry:
         try:
             text = md.read_text(encoding="utf-8")
             meta, body = _parse_frontmatter(text)
-            name = str(meta.get("name") or skill_dir.name)
+            name = str(meta.get("name") or skill_dir.name.split("@", 1)[0])
             if not NAME_RE.match(name):
                 events.emit("skills.skip", reason="bad_name",
                             dir=str(skill_dir), name=name)
@@ -194,6 +263,24 @@ class SkillRegistry:
             allowed = meta.get("allowed_tools") or []
             if isinstance(allowed, str):
                 allowed = [allowed]
+            version = str(meta.get("version") or "0.0.0")
+            # If frontmatter omits version, fall back to dir suffix "@x.y.z"
+            if version == "0.0.0" and "@" in skill_dir.name:
+                version = skill_dir.name.split("@", 1)[1]
+            # .install.json (written by skill_market) may carry source/sha
+            source = None
+            sha256 = None
+            inst = skill_dir / ".install.json"
+            if inst.is_file():
+                try:
+                    import json
+                    j = json.loads(inst.read_text(encoding="utf-8"))
+                    source = j.get("source")
+                    sha256 = j.get("sha256")
+                    if not version or version == "0.0.0":
+                        version = j.get("version", version)
+                except Exception:
+                    pass
             return SkillManifest(
                 name=name,
                 description=desc,
@@ -201,6 +288,9 @@ class SkillRegistry:
                 dir=skill_dir.resolve(),
                 allowed_tools=list(allowed),
                 auto_load=bool(meta.get("auto_load", False)),
+                version=version,
+                source=source,
+                sha256=sha256,
             )
         except Exception as e:
             events.emit("skills.skip", reason="parse_error",

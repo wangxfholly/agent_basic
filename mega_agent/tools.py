@@ -227,6 +227,47 @@ def t_refresh_skills(_):
     return {"count": skills.refresh()}
 
 
+# ---- skill marketplace ----
+def t_install_skill(inp):
+    from . import skill_market
+    return skill_market.install(
+        inp["source"],
+        sha256=inp.get("sha256"),
+        force=inp.get("force", False),
+        allow_unsigned=inp.get("allow_unsigned"),
+        require_signature=inp.get("require_signature"),
+        insecure=inp.get("insecure", False),
+    )
+
+
+def t_remove_skill(inp):
+    from . import skill_market
+    return skill_market.remove(inp["name"], version=inp.get("version"))
+
+
+def t_list_installed_skills(_):
+    from . import skill_market
+    return skill_market.list_installed()
+
+
+def t_verify_installed_skill(inp):
+    from . import skill_market
+    return skill_market.verify_installed(name=inp.get("name"))
+
+
+def t_sync_skills(_):
+    from . import skill_market
+    return skill_market.sync()
+
+
+def t_pin_skill(inp):
+    return {"pinned": skills.pin(inp["name"], inp.get("version"))}
+
+
+def t_skill_versions(inp):
+    return {"versions": skills.all_versions(inp["name"])}
+
+
 # ---- registry ----
 TOOL_HANDLERS: dict[str, Callable] = {
     # base
@@ -257,6 +298,12 @@ TOOL_HANDLERS: dict[str, Callable] = {
     "list_skills": t_list_skills, "load_skill": t_load_skill,
     "unload_skill": t_unload_skill, "run_skill_script": t_run_skill_script,
     "refresh_skills": t_refresh_skills,
+    # skill marketplace
+    "install_skill": t_install_skill, "remove_skill": t_remove_skill,
+    "list_installed_skills": t_list_installed_skills,
+    "verify_installed_skill": t_verify_installed_skill,
+    "sync_skills": t_sync_skills,
+    "pin_skill": t_pin_skill, "skill_versions": t_skill_versions,
 }
 
 

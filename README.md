@@ -579,6 +579,100 @@ mcp.register("skills",
 Runnable demo: [`examples/07_skills.py`](examples/07_skills.py).
 Bundled example skill: [`skills/csv-analyst/`](skills/csv-analyst/).
 
+### Marketplace · install / remove / pin / sync / 市场安装
+
+**EN —** mega has a built-in skill marketplace that ships with the runtime — no central registry required, like `go install`. You install from a git repo, an http(s) tarball, or a local directory. Every install is a 7-stage pipeline that **never executes skill code at install time** (supply-chain red line).
+
+**中文 —** mega 自带 skill 市场,不依赖中心服务,类似 `go install`。来源支持 git 仓库、http(s) tarball、本地目录。每次安装走 7 步流水线,**安装阶段绝不执行 skill 自带的脚本**(供应链红线)。
+
+```
+PARSE → POLICY → FETCH → VERIFY → RESOLVE → COMMIT → ACTIVATE
+   ↑       ↑        ↑        ↑          ↑         ↑          ↑
+ source  hosts   tmp dir  SKILL.md   target    atomic    refresh
+ + sha   allow-  (no exec) name re   <name>@   rename +  registry
+        list              + sig +    <ver>     lockfile
+                          sha256
+```
+
+#### Sources / 安装来源
+
+```python
+from mega_agent import install_skill
+
+# Git (shallow clone --depth=1, .git stripped after fetch)
+install_skill("git+https://github.com/foo/csv-analyst.git@v0.4.0")
+
+# HTTP(S) tarball or zip — sha256 is mandatory unless insecure=True
+install_skill(
+    "https://example.com/skills/log-summarizer.tar.gz",
+    sha256="9f8e7d6c5b4a...",
+)
+
+# Local directory (development workflow)
+install_skill("./skills-staging/my-skill")
+```
+
+#### Storage layout / 存储布局
+
+```
+~/.mega/
+├── skills/<name>@<version>/        # 一个版本一个目录,可并存
+│   ├── SKILL.md
+│   ├── scripts/
+│   └── .install.json               # 安装元数据
+├── skills.lock.json                # 全局锁文件(单一事实源)
+├── skills.toml                     # 策略:allowed_hosts / require_signature
+├── trusted_keys/*.pub              # Ed25519 公钥白名单
+└── cache/<sha256>                  # tarball 下载缓存,加速重装
+```
+
+`SkillRegistry` already searches `~/.mega/skills/`,所以装完调一次 `skills.refresh()` 就出现在 catalog,**完全零侵入**。
+
+#### Multi-version + pin / 多版本与版本锁
+
+```python
+from mega_agent import skills
+
+skills.all_versions("csv-analyst")     # ['0.4.0', '0.3.1']
+# default: highest SemVer
+skills.pin("csv-analyst", "0.3.1")     # rollback to old
+skills.pin("csv-analyst", None)        # unpin
+```
+
+#### Native tools / 原生工具
+
+| Tool | EN | 中文 |
+|---|---|---|
+| `install_skill(source, sha256?, force?, insecure?, allow_unsigned?)` | Run the install pipeline | 跑安装流水线 |
+| `remove_skill(name, version?)` | Remove one (or all) versions | 删除某版本(不传则全删) |
+| `list_installed_skills` | Return the lockfile | 返回锁文件 |
+| `verify_installed_skill(name?)` | Re-hash on disk vs lockfile | 重算文件 hash 与锁文件比对 |
+| `sync_skills` | Reproduce installs from lockfile | 按锁文件重建一台机 |
+| `pin_skill(name, version?)` | Pin / unpin a version | 锁定/解锁版本 |
+| `skill_versions(name)` | List installed versions | 列出已装版本 |
+
+#### Security model / 安全模型
+
+| Layer / 层 | EN | 中文 |
+|---|---|---|
+| Host allowlist | `skills.toml` `allowed_hosts = [...]`; empty = unrestricted | 域名白名单,空数组等于不限 |
+| sha256 | Required for http sources unless `insecure=True` | http 源强制 sha256(`insecure=True` 才放行) |
+| Ed25519 signature | Optional `SKILL.md.sig` verified against `trusted_keys/*.pub` (PEM) | 可选 Ed25519 签名,与 `trusted_keys/*.pub` 比对 |
+| `require_signature` | Set true to reject unsigned skills outright | 置 true 直接拒装未签名 skill |
+| **No install hooks** | Install never runs `subprocess` on skill content | 安装阶段绝不执行 skill 内任何脚本 |
+
+#### Reproducibility / 可复现
+
+```python
+from mega_agent import sync_skills, list_installed_skills
+
+list_installed_skills()  # → {"version": 1, "skills": {...}}
+# Ship skills.lock.json to a fresh machine, then:
+sync_skills()            # walks the lockfile, reinstalls each entry
+```
+
+Runnable demo: [`examples/08_skill_market.py`](examples/08_skill_market.py).
+
 ---
 
 ## ⚙️ Configuration reference / 配置参考
@@ -634,6 +728,10 @@ Bundled example skill: [`skills/csv-analyst/`](skills/csv-analyst/).
 | `.memory/vectors/` | Vector backend persistence (chroma) | 向量后端持久化(chroma) |
 | `skills/` | Project-local skill library (committed) | 项目级 skill 库(可入仓) |
 | `~/.mega/skills/` | User-level skill library (per-user) | 用户级 skill 库 |
+| `~/.mega/skills.lock.json` | Marketplace lockfile (source/sha/version) | 市场锁文件 |
+| `~/.mega/skills.toml` | Marketplace policy (allowed_hosts, signatures) | 市场策略 |
+| `~/.mega/trusted_keys/*.pub` | Ed25519 keys for signature verification | 签名验证公钥 |
+| `~/.mega/cache/` | Tarball download cache | tarball 下载缓存 |
 | `.hooks.json` | User-defined hook declarations | 用户定义的钩子声明 |
 
 ---
