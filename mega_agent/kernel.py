@@ -66,14 +66,17 @@ def _exec_tool(name: str, tool_input: dict) -> tuple[bool, Any, dict]:
 
 def agent_loop(user_prompt: str, *, role: str = "lead",
                llm: LLMClient | None = None,
-               route: str | None = None) -> list[dict]:
+               route: str | None = None,
+               recall_k: int = 5) -> list[dict]:
     """
     Main loop. Talks to LLM strictly through `LLMClient.complete()`.
     Returns the full message history (last item contains the final answer).
     """
     llm = llm or make_llm_client(route=route)
     tools = build_tool_schemas()
-    sys_prompt = build_system_prompt(role=role)
+    sys_prompt = build_system_prompt(
+        role=role, recall_query=user_prompt, recall_k=recall_k,
+    )
     messages: list[dict] = [{"role": "user", "content": user_prompt}]
 
     for i in range(MAX_LOOP_ITERS):

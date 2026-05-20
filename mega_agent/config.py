@@ -47,6 +47,10 @@ REQUESTS_DIR     = TEAM_DIR / "requests"
 TEAM_CONFIG      = TEAM_DIR / "config.json"
 CLAIM_EVENTS     = TEAM_DIR / "claim_events.jsonl"
 MEMORY_FILE      = WORKDIR / "CLAUDE.md"
+MEMORY_DIR       = WORKDIR / ".memory"
+MEMORY_FACTS     = MEMORY_DIR / "facts.jsonl"
+MEMORY_KV        = MEMORY_DIR / "kv.json"
+MEMORY_VECTORS   = MEMORY_DIR / "vectors"
 HOOKS_FILE       = WORKDIR / ".hooks.json"
 MODELS_FILE      = WORKDIR / "models.json"
 MODELS_ENC_FILE  = WORKDIR / "models.json.enc"
@@ -57,7 +61,8 @@ NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,40}")
 
 def ensure_dirs() -> None:
     for d in [TASKS_DIR, WORKTREE_ROOT, RUNTIME_TASKS, CRON_DIR,
-              TEAM_DIR, INBOX_DIR, REQUESTS_DIR]:
+              TEAM_DIR, INBOX_DIR, REQUESTS_DIR,
+              MEMORY_DIR, MEMORY_VECTORS]:
         d.mkdir(parents=True, exist_ok=True)
     if not WORKTREE_INDEX.exists():
         WORKTREE_INDEX.write_text("{}", encoding="utf-8")

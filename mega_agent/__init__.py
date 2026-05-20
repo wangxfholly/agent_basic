@@ -34,6 +34,14 @@ from .llm import (
     make_llm_client,
 )
 from .mcp import MCPClient, MCPRegistry, mcp
+from .memory import (
+    ChromaBackend,
+    MemoryStore,
+    MockBackend,
+    NaiveBackend,
+    VectorBackend,
+    memory,
+)
 from .permissions import CapabilityPermissionGate, permissions
 from .profiles import ProfileStore, SecretBox, profiles, secrets
 from .retry import RetryBudget, retry_budget
@@ -54,11 +62,13 @@ __all__ = [
     "events", "hooks", "permissions", "retry_budget",
     "tasks", "worktrees", "background", "cron", "notify_q",
     "bus", "team", "requests_store", "mcp", "profiles", "secrets",
+    "memory",
     # types
     "EventBus" if False else "events",  # placeholder; classes re-exported below
     "CapabilityPermissionGate", "RetryBudget", "TaskManager", "WorktreeManager",
     "MessageBus", "RequestStore", "TeammateManager",
     "MCPClient", "MCPRegistry", "ProfileStore", "SecretBox",
+    "MemoryStore", "VectorBackend", "NaiveBackend", "MockBackend", "ChromaBackend",
     # tools
     "TOOL_HANDLERS", "build_tool_schemas", "normalize_tool_result",
     # prompt

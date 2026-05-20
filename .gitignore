@@ -13,6 +13,7 @@ models.json.enc
 # memory & hooks (may contain user-specific notes)
 CLAUDE.md
 .hooks.json
+.memory/
 
 # python
 __pycache__/

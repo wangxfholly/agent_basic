@@ -437,6 +437,83 @@ mcp.register("github",     ["mcp-server-github"])
 
 ---
 
+## 🧠 Memory / 记忆
+
+**EN —** mega_agent ships a layered memory module so agents can carry knowledge **across turns and across processes** without any external service.
+
+**中文 —** mega_agent 自带分层记忆模块,Agent 无需依赖外部服务即可在 **对话之间、进程之间** 沉淀知识。
+
+| Layer / 层 | Backed by / 存储 | EN | 中文 |
+|---|---|---|---|
+| **Project memory** | `CLAUDE.md` | Static rules / facts injected into every system prompt | 静态规则/事实,注入每次系统提示词 |
+| **Episodic** | `.memory/facts.jsonl` | Append-only log of `remember()` calls (timestamped) | `remember()` 的追加式日志(带时间戳) |
+| **Semantic KV** | `.memory/kv.json` | Single-value preferences via `set_pref / get_pref` | 单值偏好,通过 `set_pref / get_pref` |
+| **Vector recall** | `.memory/vectors/` | Pluggable backend: `naive` (default) \| `chroma` \| `mock` | 可插拔向量后端 |
+
+### Native tools / 原生工具
+
+```python
+from mega_agent import memory
+
+memory.remember("user prefers dark mode", kind="preference",
+                user_id="alice", topic="ui")
+memory.recall("what theme does the user like?", k=3)
+memory.set("alice.lang", "zh-CN")
+memory.get("alice.lang")
+memory.forget("<fact_id>")
+memory.forget_user("alice")     # GDPR-style purge
+```
+
+The kernel auto-injects the top-k recalled facts into the system prompt every turn (controlled by `agent_loop(..., recall_k=5)`).
+
+内核每一轮会把当前用户输入的 top-k 相关记忆自动注入 system prompt(由 `agent_loop(..., recall_k=5)` 控制)。
+
+### Vector backends / 向量后端
+
+```bash
+# Default — pure-stdlib BM25-ish lexical scorer, zero deps.
+AGENT_MEMORY_BACKEND=naive
+
+# Production — persistent vector DB (pip install chromadb).
+AGENT_MEMORY_BACKEND=chroma
+
+# Tests — deterministic mock that records all calls.
+AGENT_MEMORY_BACKEND=mock
+```
+
+Implement your own by satisfying the `VectorBackend` Protocol (`index / search / delete`).
+
+实现自定义后端只需满足 `VectorBackend` Protocol 三个方法 (`index / search / delete`)。
+
+### Standalone MCP server / 独立 MCP Server
+
+**EN —** The same `MemoryStore` is also exposed as a **standalone MCP server** (`mcp_servers/mega_memory_server.py`) so any MCP-compatible host (Claude Desktop, Cursor, your own kernel) can attach to one persistent memory pool.
+
+**中文 —** 同一份 `MemoryStore` 还以 **独立 MCP Server** 形式暴露(`mcp_servers/mega_memory_server.py`),任何兼容 MCP 的宿主(Claude Desktop、Cursor、自研内核)都能挂接到同一份持久化记忆池。
+
+```python
+from mega_agent import mcp
+mcp.register("memory", ["python", "-m", "mcp_servers.mega_memory_server"])
+# tools surface as: mcp__memory__remember / mcp__memory__recall / ...
+```
+
+Or wire it into Claude Desktop's `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "mega-memory": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.mega_memory_server"]
+    }
+  }
+}
+```
+
+Runnable demo: [`examples/06_memory.py`](examples/06_memory.py).
+
+---
+
 ## ⚙️ Configuration reference / 配置参考
 
 ### Environment variables / 环境变量
@@ -455,6 +532,7 @@ mcp.register("github",     ["mcp-server-github"])
 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` | _(empty)_ | Accepted as fallback | 作为兜底接受 |
 | `ANTHROPIC_API_KEY` | _(empty)_ | Anthropic native key | Anthropic 原生 Key |
 | `AGENT_MASTER_PASSWORD` | _(empty)_ | **Set this to enable Fernet encryption of `models.json`** | **设置后开启 `models.json` 的 Fernet 加密** |
+| `AGENT_MEMORY_BACKEND` | `naive` | `naive` \| `chroma` \| `mock` — vector recall backend | 向量召回后端 |
 
 ### REPL commands / REPL 命令
 
@@ -484,6 +562,9 @@ mcp.register("github",     ["mcp-server-github"])
 | `models.json` / `models.json.enc` | Profile store (plaintext or encrypted) | Profile 仓库(明文或加密) |
 | `.master-key.salt` | PBKDF2 salt for the encrypted store | 加密仓库的 PBKDF2 盐 |
 | `CLAUDE.md` | Project memory injected into the system prompt | 注入系统提示词的项目记忆 |
+| `.memory/facts.jsonl` | Episodic memory log (append-only) | 情景记忆日志(只追加) |
+| `.memory/kv.json` | Semantic KV preferences | 语义 KV 偏好 |
+| `.memory/vectors/` | Vector backend persistence (chroma) | 向量后端持久化(chroma) |
 | `.hooks.json` | User-defined hook declarations | 用户定义的钩子声明 |
 
 ---

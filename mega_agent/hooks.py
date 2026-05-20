@@ -41,8 +41,10 @@ def load_memory() -> str:
     return ""
 
 
-def build_system_prompt(role: str = "lead") -> str:
-    memory = load_memory()
+def build_system_prompt(role: str = "lead",
+                        recall_query: str | None = None,
+                        recall_k: int = 5) -> str:
+    memory_text = load_memory()
     base = f"""You are mega_agent, a layered agent runtime.
 Role: {role}
 Workdir: {WORKDIR}
@@ -58,7 +60,25 @@ Rules:
   - Use create_task BEFORE multi-step work; bind worktree for isolated execution.
   - Long-running work → background_run; recurring → cron_register.
   - Inbox/auto-claim messages arrive as <inbox>/<auto-claimed> tags — handle them.
+  - Memory: use `remember` to persist learnings, `recall` to look them up,
+    `set_pref/get_pref` for stable preferences. Forget on user request.
 """
-    if memory:
-        base += f"\n# Project Memory (CLAUDE.md)\n{memory}\n"
+    if memory_text:
+        base += f"\n# Project Memory (CLAUDE.md)\n{memory_text}\n"
+
+    # Auto-recall is opt-in (kernel passes recall_query for the user turn)
+    if recall_query:
+        try:
+            from .memory import memory as _mem
+            hits = _mem.recall(recall_query, k=recall_k)
+            if hits:
+                lines = ["\n# Recalled memories (top-k by relevance)"]
+                for h in hits:
+                    lines.append(
+                        f"- [{h.get('score', '?')}] {h.get('text', '')[:200]}"
+                    )
+                base += "\n".join(lines) + "\n"
+        except Exception:
+            # Memory failure must never block the loop.
+            pass
     return base

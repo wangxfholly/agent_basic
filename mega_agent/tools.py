@@ -17,6 +17,7 @@ from .background import background, cron
 from .config import WORKDIR
 from .events import events
 from .mcp import mcp
+from .memory import memory
 from .tasks import tasks
 from .teams import bus, team
 from .worktree import worktrees
@@ -163,6 +164,43 @@ def t_shutdown_teammate(inp):
 def t_idle(_):  return {"status": "idle"}
 
 
+# ---- memory ----
+def t_remember(inp):
+    return memory.remember(
+        content=inp["content"],
+        kind=inp.get("kind", "fact"),
+        user_id=inp.get("user_id"),
+        **(inp.get("tags") or {}),
+    )
+
+
+def t_recall(inp):
+    return {"hits": memory.recall(
+        query=inp["query"], k=inp.get("k", 5),
+        user_id=inp.get("user_id"))}
+
+
+def t_forget(inp):
+    return {"removed": memory.forget(inp["fact_id"])}
+
+
+def t_list_memory(inp):
+    return {"facts": memory.list_facts(
+        user_id=inp.get("user_id"), limit=inp.get("limit", 100))}
+
+
+def t_set_pref(inp):
+    memory.set(inp["key"], inp["value"]); return {"ok": True}
+
+
+def t_get_pref(inp):
+    return {"value": memory.get(inp["key"])}
+
+
+def t_forget_user(inp):
+    return {"purged": memory.forget_user(inp["user_id"])}
+
+
 # ---- registry ----
 TOOL_HANDLERS: dict[str, Callable] = {
     # base
@@ -184,6 +222,11 @@ TOOL_HANDLERS: dict[str, Callable] = {
     "spawn": t_spawn, "list_teammates": t_list_teammates,
     "send_message": t_send_message, "read_my_inbox": t_read_my_inbox,
     "shutdown_teammate": t_shutdown_teammate, "idle": t_idle,
+    # memory
+    "remember": t_remember, "recall": t_recall, "forget": t_forget,
+    "list_memory": t_list_memory,
+    "set_pref": t_set_pref, "get_pref": t_get_pref,
+    "forget_user": t_forget_user,
 }
 
 
