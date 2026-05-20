@@ -514,6 +514,73 @@ Runnable demo: [`examples/06_memory.py`](examples/06_memory.py).
 
 ---
 
+## 🎒 Skills / 技能包
+
+**EN —** Skills are on-demand capability bundles that follow the Claude Code / Anthropic Skills file layout. Each skill is a directory with `SKILL.md` (YAML frontmatter + markdown body) plus optional `scripts/` and `resources/`. The kernel injects only a one-line catalog into every system prompt; the LLM activates a skill via `load_skill(name)` when relevant — keeping token cost flat as the library grows.
+
+**中文 —** Skills 是按需加载的能力包,文件布局对齐 Claude Code / Anthropic Skills:每个 skill 是一个目录,含 `SKILL.md`(YAML frontmatter + markdown 正文)以及可选的 `scripts/` 和 `resources/`。内核只把一行目录注入 system prompt,LLM 在需要时通过 `load_skill(name)` 激活 —— 哪怕 skill 越来越多,token 开销也保持平稳。
+
+### File layout / 文件布局
+
+```
+skills/
+  csv-analyst/
+    SKILL.md           # required — frontmatter + body
+    scripts/
+      profile.py       # invoked via run_skill_script
+    resources/         # optional templates / data
+```
+
+`SKILL.md` frontmatter:
+
+```yaml
+---
+name: csv-analyst
+description: Profile a CSV file using stdlib only.
+allowed_tools:        # optional — auto-allowlisted on load
+  - bash
+  - read_file
+auto_load: false      # optional — eager body injection
+---
+```
+
+### Native tools / 原生工具
+
+| Tool | EN | 中文 |
+|---|---|---|
+| `list_skills` | List discoverable skills | 列出可发现的 skill |
+| `load_skill(name)` | Activate a skill — body sticks in subsequent system prompts | 激活 skill,正文从下一轮起注入 |
+| `unload_skill(name)` | Deactivate a previously loaded skill | 卸载已激活的 skill |
+| `run_skill_script(name, script, args)` | Execute a script under `<skill>/scripts/` (path-traversal blocked) | 执行 skill 自带脚本(防路径穿越) |
+| `refresh_skills` | Re-scan the search dirs | 重新扫描搜索目录 |
+
+### Search path / 搜索路径
+
+1. `<WORKDIR>/skills/` — project-local
+2. `~/.mega/skills/` — user-level
+
+First match wins; later dirs do not override earlier names.
+
+第一个命中为准,后面的目录不会覆盖前面的同名 skill。
+
+### Standalone MCP server / 独立 MCP Server
+
+Same dual-form pattern as memory: `mcp_servers/mega_skills_server.py` exposes the registry over JSON-RPC 2.0 / stdio, so any MCP host (Claude Desktop, Cursor, your own kernel) can attach to one shared skill library.
+
+与 memory 一致的"内嵌 + 独立"双形态:`mcp_servers/mega_skills_server.py` 通过 JSON-RPC 2.0 / stdio 暴露 registry,任何 MCP host 都能挂接同一份 skill 库。
+
+```python
+from mega_agent import mcp
+mcp.register("skills",
+             ["python", "-m", "mcp_servers.mega_skills_server"])
+# tools surface as: mcp__skills__list_skills / mcp__skills__load_skill / ...
+```
+
+Runnable demo: [`examples/07_skills.py`](examples/07_skills.py).
+Bundled example skill: [`skills/csv-analyst/`](skills/csv-analyst/).
+
+---
+
 ## ⚙️ Configuration reference / 配置参考
 
 ### Environment variables / 环境变量
@@ -565,6 +632,8 @@ Runnable demo: [`examples/06_memory.py`](examples/06_memory.py).
 | `.memory/facts.jsonl` | Episodic memory log (append-only) | 情景记忆日志(只追加) |
 | `.memory/kv.json` | Semantic KV preferences | 语义 KV 偏好 |
 | `.memory/vectors/` | Vector backend persistence (chroma) | 向量后端持久化(chroma) |
+| `skills/` | Project-local skill library (committed) | 项目级 skill 库(可入仓) |
+| `~/.mega/skills/` | User-level skill library (per-user) | 用户级 skill 库 |
 | `.hooks.json` | User-defined hook declarations | 用户定义的钩子声明 |
 
 ---

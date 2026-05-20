@@ -45,6 +45,13 @@ from .memory import (
 from .permissions import CapabilityPermissionGate, permissions
 from .profiles import ProfileStore, SecretBox, profiles, secrets
 from .retry import RetryBudget, retry_budget
+from .skills import (
+    SkillManifest,
+    SkillRegistry,
+    render_active_skills_block,
+    render_skill_catalog_block,
+    skills,
+)
 from .tasks import TaskManager, tasks
 from .teams import MessageBus, RequestStore, TeammateManager, bus, requests_store, team
 from .tools import TOOL_HANDLERS, build_tool_schemas, normalize_tool_result
@@ -62,13 +69,15 @@ __all__ = [
     "events", "hooks", "permissions", "retry_budget",
     "tasks", "worktrees", "background", "cron", "notify_q",
     "bus", "team", "requests_store", "mcp", "profiles", "secrets",
-    "memory",
+    "memory", "skills",
     # types
     "EventBus" if False else "events",  # placeholder; classes re-exported below
     "CapabilityPermissionGate", "RetryBudget", "TaskManager", "WorktreeManager",
     "MessageBus", "RequestStore", "TeammateManager",
     "MCPClient", "MCPRegistry", "ProfileStore", "SecretBox",
     "MemoryStore", "VectorBackend", "NaiveBackend", "MockBackend", "ChromaBackend",
+    "SkillRegistry", "SkillManifest",
+    "render_skill_catalog_block", "render_active_skills_block",
     # tools
     "TOOL_HANDLERS", "build_tool_schemas", "normalize_tool_result",
     # prompt

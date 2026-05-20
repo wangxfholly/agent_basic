@@ -62,6 +62,8 @@ Rules:
   - Inbox/auto-claim messages arrive as <inbox>/<auto-claimed> tags — handle them.
   - Memory: use `remember` to persist learnings, `recall` to look them up,
     `set_pref/get_pref` for stable preferences. Forget on user request.
+  - Skills: scan the catalog below; call `load_skill(name)` to activate one
+    before tackling a matching task. Loaded bodies stick for the rest of the run.
 """
     if memory_text:
         base += f"\n# Project Memory (CLAUDE.md)\n{memory_text}\n"
@@ -81,4 +83,16 @@ Rules:
         except Exception:
             # Memory failure must never block the loop.
             pass
+
+    # Skills: cheap catalog every turn + bodies of currently-loaded skills.
+    try:
+        from .skills import skills as _skills, render_active_skills_block, render_skill_catalog_block
+        catalog = render_skill_catalog_block(_skills)
+        if catalog:
+            base += "\n" + catalog + "\n"
+        active = render_active_skills_block(_skills)
+        if active:
+            base += "\n" + active + "\n"
+    except Exception:
+        pass
     return base

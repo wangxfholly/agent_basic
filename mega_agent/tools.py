@@ -18,6 +18,7 @@ from .config import WORKDIR
 from .events import events
 from .mcp import mcp
 from .memory import memory
+from .skills import skills
 from .tasks import tasks
 from .teams import bus, team
 from .worktree import worktrees
@@ -201,6 +202,31 @@ def t_forget_user(inp):
     return {"purged": memory.forget_user(inp["user_id"])}
 
 
+# ---- skills ----
+def t_list_skills(_):
+    return {"skills": skills.catalog()}
+
+
+def t_load_skill(inp):
+    return skills.load(inp["name"])
+
+
+def t_unload_skill(inp):
+    return {"unloaded": skills.unload(inp["name"])}
+
+
+def t_run_skill_script(inp):
+    return skills.run_script(
+        inp["name"], inp["script"],
+        args=inp.get("args"),
+        timeout=inp.get("timeout", 60),
+    )
+
+
+def t_refresh_skills(_):
+    return {"count": skills.refresh()}
+
+
 # ---- registry ----
 TOOL_HANDLERS: dict[str, Callable] = {
     # base
@@ -227,6 +253,10 @@ TOOL_HANDLERS: dict[str, Callable] = {
     "list_memory": t_list_memory,
     "set_pref": t_set_pref, "get_pref": t_get_pref,
     "forget_user": t_forget_user,
+    # skills
+    "list_skills": t_list_skills, "load_skill": t_load_skill,
+    "unload_skill": t_unload_skill, "run_skill_script": t_run_skill_script,
+    "refresh_skills": t_refresh_skills,
 }
 
 
