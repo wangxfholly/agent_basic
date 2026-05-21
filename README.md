@@ -35,6 +35,7 @@
 | **Cross-session memory** — append-only facts log + KV preferences + pluggable vector backend (`naive` BM25-ish / `chroma` / `mock`); auto-recall injects relevant memories into the system prompt. | **跨会话记忆** —— 只追加事实日志 + KV 偏好 + 可插拔向量后端(`naive` BM25 / `chroma` / `mock`);自动召回相关记忆注入系统提示词。 |
 | **Skills + signed marketplace** — Anthropic-compatible SKILL.md bundles, on-demand load, multi-version + pin, atomic install from `git+`/https/local with sha256 + Ed25519 signature checks. | **Skill + 签名市场** —— 兼容 Anthropic SKILL.md,按需加载,多版本+pin,从 `git+`/https/本地原子安装,带 sha256 + Ed25519 签名校验。 |
 | **Streaming + Ctrl-C cancel** — every adapter exposes `.stream()`; the kernel honours a `cancel_event` flag and unwinds cleanly without breaking the tool_use ↔ tool_result contract. | **流式输出 + Ctrl-C 中断** —— 每个 adapter 都实现 `.stream()`;内核遵守 `cancel_event` 标志,优雅退出且不破坏 tool_use ↔ tool_result 契约。 |
+| **Observability + loop guard** — JSONL event bus (`events.jsonl`), `before/after/error` hook chain ready for OpenTelemetry GenAI semconv, plus a drop-in repeat-call detector that turns oscillation into a recoverable `tool_result`. | **可观测 + 防循环** —— JSONL 事件总线 `events.jsonl`、`before/after/error` 钩子链可直接对接 OpenTelemetry GenAI 语义,内置可插拔重复调用检测器,把震荡转成可恢复的 `tool_result`。 |
 
 ---
 
@@ -395,6 +396,115 @@ you> worktree_closeout feat-a action=remove complete_task=true
 **EN —** Each worktree is a real `git worktree add`, on its own branch (`wt/<name>`). Multiple subagents can edit files in isolation; `worktree_closeout` either keeps or removes the branch and updates the bound task.
 
 **中文 —** 每个 worktree 都是真实的 `git worktree add`,独立分支(`wt/<name>`)。多个子 Agent 可以在文件层面互不干扰;`worktree_closeout` 可选保留或删除分支,并同步更新绑定任务。
+
+---
+
+## 🔭 Observability & loop guard / 可观测与防循环
+
+**EN —** Traditional service monitoring (RED / USE) only catches "the box is down". An LLM agent can also go *insane* — hallucinate, oscillate between two tools, or burn $$$ in a context-stuffing loop while every HTTP code stays 200. mega_agent ships first-class hooks for the four signals that classical APMs miss: **iter depth, token cost, tool-error topology, and stop-reason mix**.
+
+**中文 —** 传统 RED/USE 监控只能告诉你"机器坏没坏",但 Agent 还会"疯掉" —— 幻觉、两个工具反复互调、上下文塞爆烧钱,而 HTTP 码全程 200。mega_agent 内置了经典 APM 抓不到的四个信号:**迭代深度、Token 成本、工具错误拓扑、stop_reason 分布**。
+
+### Built-in telemetry surface / 内置遥测面
+
+| Signal / 信号 | Where it comes from / 来源 | What to do with it / 怎么用 |
+|---|---|---|
+| `events.jsonl` append-only bus | `mega_agent.events.EventBus` — every kernel/tool/permission/hook event lands here with `{id, ts, kind, …}` | tail / `jq` / ship to Loki / ClickHouse |
+| `hooks.before / after / error` chain | `mega_agent.hooks.HookBus` emits `tool.before`, `tool.after`, `tool.error`, `loop.iter` from the kernel — wrap any tool call with metrics, tracing, redaction | one-line OTel exporter, zero kernel changes |
+| Retry budget telemetry | `retry.py` records consecutive-failure counts per tool | alert on `tool_disabled` events |
+| Stop-reason stream | every `agent_loop` exit writes `kind=loop.iter` (per turn) and a final response with `stop_reason` | dashboard the `end_turn / max_iter / cancelled / error` mix |
+| LLM usage | adapters surface `usage.input_tokens` / `usage.output_tokens` in each `LLMResponse` | feed `$/turn` and context-pressure gauges |
+| Cancellation | `cancel_event` flips → kernel emits `[cancelled by user]` and synthesizes `tool_result: CANCELLED by user` for in-flight `tool_use` blocks | proves the contract held; useful in load tests |
+
+> Default location: `${AGENT_WORKDIR}/events.jsonl` (override via `AGENT_EVENTS_LOG`). Rotate with `logrotate` or pipe through `vector` / OTel Collector.
+
+### Loop guard / 防循环三件套
+
+LLM agents loop for 4 textbook reasons — **A↔B oscillation, same-args retry, context bloat, goal drift**. mega_agent ships three layered defences:
+
+1. **Hard cap** — `AGENT_MAX_ITERS` (default 50) terminates with a `max_iter` exit reason.
+2. **Retry budget** — same-tool consecutive failures auto-disable that tool and tell the LLM (see [Retry budget](#retry-budget--重试预算)).
+3. **Repeat-call detector (opt-in hook)** — register a handler on `tool.before` to spot oscillation and same-args replay, then emit a `loop.detected` event for your monitor / alarm to act on:
+
+```python
+import hashlib, json, collections
+from mega_agent.hooks import hooks
+from mega_agent.events import events
+
+_recent = collections.deque(maxlen=8)
+
+def _loop_guard(payload):
+    name  = payload.get("name")
+    args  = payload.get("input") or {}
+    sig   = hashlib.md5(f"{name}:{json.dumps(args, sort_keys=True)}".encode()).hexdigest()[:10]
+    _recent.append(sig)
+    if _recent.count(sig) >= 3:                  # same call ≥3× in last 8 steps
+        events.emit("loop.detected", tool=name, sig=sig)
+
+hooks.on("tool.before", _loop_guard)
+```
+
+> Hook handlers are advisory (exceptions get caught and logged as `hook.failed`).
+> For *enforcement*, drive cancellation from outside: when your monitor sees a
+> `loop.detected` burst, flip the `cancel_event` you passed into `agent_loop`
+> — the kernel will unwind cleanly and keep the tool_use ↔ tool_result
+> contract intact.
+
+### Wiring to OpenTelemetry / 接入 OpenTelemetry
+
+`hooks.py` is the single integration point — no kernel patch needed. Minimal exporter:
+
+```python
+from opentelemetry import trace, metrics
+from mega_agent.hooks import hooks
+
+tracer = trace.get_tracer("mega_agent")
+meter  = metrics.get_meter("mega_agent")
+m_tool = meter.create_counter  ("agent.tool.calls")
+m_terr = meter.create_counter  ("agent.tool.errors")
+m_iter = meter.create_histogram("agent.iter.depth")
+
+_spans = {}
+
+def _pre(p):
+    name = p.get("name")
+    _spans[name] = tracer.start_span(f"tool.{name}")
+    m_tool.add(1, {"tool": name})
+
+def _post(p):
+    sp = _spans.pop(p.get("name"), None)
+    if sp: sp.end()
+
+def _err(p):
+    name = p.get("name")
+    m_terr.add(1, {"tool": name})
+    sp = _spans.pop(name, None)
+    if sp:
+        sp.set_attribute("error", str(p.get("error", ""))[:200]); sp.end()
+
+def _iter(p):
+    m_iter.record(p.get("iter", 0), {"backend": p.get("backend", "unknown")})
+
+hooks.on("tool.before", _pre)
+hooks.on("tool.after",  _post)
+hooks.on("tool.error",  _err)
+hooks.on("loop.iter",   _iter)
+```
+
+> Token & cost gauges live in your LLM adapter — wrap `complete()` / `stream()` to emit `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` per the **OpenTelemetry GenAI semconv** so any LLM-aware backend (Langfuse, Phoenix, Helicone, Argos) lights up the panels for free.
+
+### What to dashboard / 必建的 6 个面板
+
+| Panel / 面板 | Key metric / 核心指标 | Why it matters / 价值 |
+|---|---|---|
+| Realtime health | `turns/min`, `P95 turn latency`, `error rate`, `$/min` | NOC at-a-glance |
+| Loop watch | `max_iter` rate, top `(tool, args_hash)`, `loop.detected` count | catches insanity before billing does |
+| Token & cost | `tokens_per_turn` per model, `$/task`, daily burn vs budget | the only metric your CFO reads |
+| Tool topology | per-tool QPS / err-rate / P99 / disabled count | which tool is the weakest link |
+| Stop-reason mix | stacked area of `end_turn / tool_use / max_tokens / max_iter / cancelled / error` | shape changes show regressions earliest |
+| Eval trend | golden-set pass-rate + online LLM-judge sample score | catches *silent* quality regressions deploys can hide |
+
+> See [docs/observability.md](docs/observability.md) for a full Grafana JSON + alert rules pack (tracked separately to keep the README skim-friendly).
 
 ---
 
@@ -771,6 +881,7 @@ git push
 | `ANTHROPIC_API_KEY` | _(empty)_ | Anthropic native key | Anthropic 原生 Key |
 | `AGENT_MASTER_PASSWORD` | _(empty)_ | **Set this to enable Fernet encryption of `models.json`** | **设置后开启 `models.json` 的 Fernet 加密** |
 | `AGENT_MEMORY_BACKEND` | `naive` | `naive` \| `chroma` \| `mock` — vector recall backend | 向量召回后端 |
+| `AGENT_EVENTS_LOG` | `${AGENT_WORKDIR}/events.jsonl` | Path of the JSONL event bus (telemetry sink) | JSONL 事件总线落盘路径(遥测出口) |
 
 ### REPL commands / REPL 命令
 
