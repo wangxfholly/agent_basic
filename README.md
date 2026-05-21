@@ -40,32 +40,37 @@
 
 ## 🏗 Architecture / 架构
 
-**EN —** Every prompt enters the kernel; the kernel asks an `LLMClient` for the next action, dispatches any `tool_use` block through the permission gate and hook chain into either a native handler or an MCP server, captures the result (success *or* error) as a `tool_result`, then loops until the LLM emits `end_turn`.
+**EN —** Every prompt enters the kernel; the kernel asks an `LLMClient` for the next action (via `complete()` or, when streaming, `stream()` with a `cancel_event`), dispatches any `tool_use` block through the permission gate and hook chain into either a native handler or an MCP server, captures the result (success *or* error) as a `tool_result`, then loops until the LLM emits `end_turn`.
 
-**中文 —** 每条 prompt 进入内核;内核向 `LLMClient` 索取下一步动作,把 `tool_use` 块经权限闸 + 钩子链派发到原生 handler 或 MCP server,把结果(成功或失败)封装成 `tool_result` 回灌,如此循环直到 LLM 输出 `end_turn`。
+**中文 —** 每条 prompt 进入内核;内核向 `LLMClient` 索取下一步动作(走 `complete()`,或开启流式时走 `stream()` + `cancel_event`),把 `tool_use` 块经权限闸 + 钩子链派发到原生 handler 或 MCP server,把结果(成功或失败)封装成 `tool_result` 回灌,如此循环直到 LLM 输出 `end_turn`。
 
 ```mermaid
 flowchart TB
     subgraph User["Caller / 调用方"]
       U[Your service / CLI / queue worker]
+      SIG([SIGINT / cancel_event<br/>Ctrl-C])
     end
 
     subgraph Kernel["L0 Kernel — agent_loop"]
       K[main loop]
       DR[drain external signals<br/>外部信号注入]
       EX[exec tool<br/>工具执行]
+      ST[stream consumer<br/>on_text + cancel check]
     end
 
-    subgraph LLM["L0.5 LLM Adapter"]
+    subgraph LLM["L0.5 LLM Adapter — complete() + stream()"]
       F[make_llm_client]
-      A[AnthropicAdapter]
-      G[GatewayAdapter<br/>OpenAI-compatible]
-      M[MockAdapter]
+      A[AnthropicAdapter<br/>SSE stream]
+      G[GatewayAdapter<br/>OpenAI delta merge]
+      M[MockAdapter<br/>chunked]
     end
 
     subgraph Layers["L1-L7 Cross-cutting layers / 横切层"]
       P[L1 Permissions<br/>allow/ask/deny]
-      H[L2 Hooks + Memory]
+      H[L2 Hooks + System Prompt]
+      MEM[L2.5 Memory<br/>facts + KV + vectors<br/>auto-recall]
+      SK[L2.5 Skills<br/>SKILL.md + scripts<br/>multi-version + pin]
+      MK[L2.5 Marketplace<br/>git+/http/local install<br/>sha256 + Ed25519 sig<br/>lockfile + sync]
       R[L3 Retry Budget]
       T[L4 Task Graph]
       W[L4 Worktree]
@@ -85,22 +90,27 @@ flowchart TB
       end
     end
 
-    subgraph Tools["Native Tools 29x"]
-      TOOLS[bash / read / write / edit<br/>create_task / worktree_*<br/>background_run / cron_*<br/>spawn / send_message / ...]
+    subgraph Tools["Native Tools 48x"]
+      TOOLS[bash / read / write / edit<br/>create_task / worktree_*<br/>background_run / cron_*<br/>spawn / send_message<br/>remember / recall / forget<br/>load_skill / run_skill_script<br/>install_skill / pin_skill / verify_installed_skill / sync_skills]
     end
 
     subgraph External["External / 外部"]
       LLMSVC[(LLM provider)]
-      MCPSVR[(MCP servers)]
-      FS[(Filesystem<br/>.tasks/ .worktrees/<br/>.team/ .requests/ etc.)]
+      MCPSVR[(MCP servers<br/>+ mega-memory / mega-skills servers)]
+      FS[(Filesystem<br/>.tasks/ .worktrees/ .team/<br/>.memory/ skills/<br/>~/.mega/skills/ ~/.mega/skills.lock.json<br/>~/.mega/trusted_keys/ ~/.mega/cache/)]
+      GIT[(git+ / https tarball<br/>signed skill repos)]
     end
 
     U -->|prompt| K
+    SIG -.->|cancel_event.set| K
+    SIG -.->|cancel_event.set| ST
     K --> DR
-    DR -->|inject tags| K
-    K -->|complete| F
+    DR -->|inject tags<br/>+ recalled memories<br/>+ active skill bodies| K
+    K -->|complete / stream| F
     F --> A & G & M
     A & G --> LLMSVC
+    K -.->|streaming| ST
+    ST -->|on_text chunks| U
     K -->|tool_use| EX
     EX --> P
     P -->|allowed| H
@@ -109,12 +119,17 @@ flowchart TB
     MC --> MCPSVR
     EX --> R
     TOOLS --> T & W & B & TM
+    TOOLS --> MEM & SK
+    SK <--> MK
+    MK -.->|fetch + verify| GIT
     TM <-->|spawn / shutdown| Subs
     Subs <-->|messages| MB
     Subs <-->|protocol| RS
     Subs -.->|autonomous claim| T
     MB -->|inject inbox| DR
-    T & W & B & TM & MB & RS --> FS
+    MEM -->|inject recalled facts| H
+    SK -->|inject skill catalog| H
+    T & W & B & TM & MB & RS & MEM & SK & MK --> FS
     PR -.->|chooses backend| F
     EX -->|tool_result| K
 ```
@@ -126,7 +141,10 @@ flowchart TB
 | `config.py` | — | Path layout + env vars + git root detection | 路径布局 + 环境变量 + git 根目录探测 |
 | `events.py` | — | Append-only JSONL event bus | 仅追加 JSONL 事件总线 |
 | `permissions.py` | L1 | Capability gate, three-state decision | 能力闸,三态决策 |
-| `hooks.py` | L2 | Synchronous hook bus + memory + system prompt | 同步钩子 + 记忆 + 系统提示词 |
+| `hooks.py` | L2 | Synchronous hook bus + system prompt (auto-injects recalled memories + skill catalog) | 同步钩子 + 系统提示词(自动注入召回记忆 + skill 目录) |
+| `memory.py` | L2.5 | Cross-session memory: facts log + KV prefs + pluggable vector backend (`naive`/`chroma`/`mock`) + GDPR forget_user | 跨会话记忆:事实日志 + KV 偏好 + 可插拔向量后端 + GDPR 注销 |
+| `skills.py` | L2.5 | SKILL.md discovery, multi-version + SemVer pin, on-demand load, `run_skill_script` with path-traversal guard | SKILL.md 发现、多版本 + SemVer pin、按需加载、带路径穿越防护的脚本执行 |
+| `skill_market.py` | L2.5 | 7-stage install pipeline (parse → policy → fetch → verify → resolve → commit → activate); sha256 + Ed25519 sig; lockfile + `sync` reproducibility | 7 段安装流水线;sha256 + Ed25519 验签;锁文件 + `sync` 可复现 |
 | `retry.py` | L3 | Per-tool failure budget with auto-disable | 按工具粒度的失败预算与自动禁用 |
 | `tasks.py` | L4 | DAG task store (one JSON file per task) | DAG 任务仓库(每任务一个 JSON 文件) |
 | `worktree.py` | L4 | Git-worktree wrapper with task binding | git-worktree 封装,与任务绑定 |
@@ -134,10 +152,13 @@ flowchart TB
 | `teams.py` | L6 | Multi-agent inbox + protocol request ledger | 多 Agent 收件箱 + 协议请求账本 |
 | `mcp.py` | L7 | Stdio + JSON-RPC 2.0 MCP client/registry | Stdio + JSON-RPC 2.0 MCP 客户端/注册表 |
 | `profiles.py` | L7 | Encrypted profile store + routing table | 加密 Profile 仓库 + 路由表 |
-| `llm/` | L0.5 | LLMClient protocol + 3 adapters + factory | LLMClient 协议 + 3 个适配器 + 工厂 |
-| `tools.py` | — | 29 native tool handlers + schema builder | 29 个原生工具 + Schema 构造器 |
-| `kernel.py` | L0 | The agent loop | Agent 主循环 |
-| `cli.py` | — | Reference REPL | 参考 REPL |
+| `llm/` | L0.5 | LLMClient protocol with `complete()` + `stream()` (SSE/delta-merge/chunked) + 3 adapters + factory | LLMClient 协议(`complete()` + `stream()`)+ 3 个适配器 + 工厂 |
+| `tools.py` | — | 48 native tool handlers + schema builder (29 base + 7 memory + 5 skills + 7 marketplace) | 48 原生工具(29 基础 + 7 记忆 + 5 skill + 7 市场)+ Schema 构造器 |
+| `kernel.py` | L0 | The agent loop · supports `on_text` streaming + `cancel_event` clean unwind | Agent 主循环 · 支持 `on_text` 流式 + `cancel_event` 优雅退出 |
+| `cli.py` | — | Reference REPL · `/skills` `/install` `/pin` `/verify` `/sync` `/stream` + SIGINT handler | 参考 REPL · `/skills` `/install` `/pin` `/verify` `/sync` `/stream` + SIGINT 处理 |
+| `mcp_servers/mega_memory_server.py` | — | Standalone MCP server exposing the memory store (7 tools) | 独立 MCP server,暴露记忆存储(7 工具) |
+| `mcp_servers/mega_skills_server.py` | — | Standalone MCP server exposing skills + marketplace (12 tools) | 独立 MCP server,暴露 skill + 市场(12 工具) |
+| `mega-skills/` | — | Push-ready signed skill catalogue (csv-analyst, log-summarizer) + Ed25519 keygen / sign tools | 即推即用的签名 skill 仓库 + Ed25519 keygen / 签名工具 |
 
 ---
 
