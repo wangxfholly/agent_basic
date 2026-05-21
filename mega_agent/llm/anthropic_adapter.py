@@ -7,6 +7,8 @@ profile (otherwise SDK falls back to ANTHROPIC_API_KEY).
 """
 from __future__ import annotations
 
+from typing import Iterator
+
 try:
     from anthropic import Anthropic
 except ImportError:  # SDK is optional — only required when this backend is used
@@ -43,3 +45,23 @@ class AnthropicAdapter(LLMClient):
             elif t == "tool_use":
                 blocks.append(ToolUseBlock(id=b.id, name=b.name, input=b.input))
         return LLMResponse(content=blocks, stop_reason=resp.stop_reason)
+
+    def stream(self, *, system, tools, messages, max_tokens=4096
+               ) -> Iterator[tuple[str, object]]:
+        """Real Anthropic SSE streaming. Yields ('text', chunk)* + ('done', LLMResponse)."""
+        with self.client.messages.stream(
+            model=self.model, system=system, tools=tools,
+            messages=messages, max_tokens=max_tokens,
+        ) as stream:
+            for chunk in stream.text_stream:
+                if chunk:
+                    yield ("text", chunk)
+            final = stream.get_final_message()
+        blocks = []
+        for b in final.content:
+            t = getattr(b, "type", None)
+            if t == "text":
+                blocks.append(TextBlock(text=b.text))
+            elif t == "tool_use":
+                blocks.append(ToolUseBlock(id=b.id, name=b.name, input=b.input))
+        yield ("done", LLMResponse(content=blocks, stop_reason=final.stop_reason))

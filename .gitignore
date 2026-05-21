@@ -18,3 +18,8 @@ CLAUDE.md
 # python
 __pycache__/
 *.pyc
+
+# Demo signed-skill catalogue ships as its own git repo at ./mega-skills/
+# so you can split it off (`cd mega-skills && git remote add origin ... && git push`).
+# Keep it untracked here to avoid submodule-pointer noise.
+mega-skills/

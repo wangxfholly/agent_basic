@@ -32,6 +32,9 @@
 | **Errors are observations** — failed tool calls become `is_error=True` results so the LLM can choose another path, not crash. | **错误即观察** —— 工具调用失败转化为 `is_error=True` 的结果让 LLM 重新决策,而不是把 loop 炸掉。 |
 | **Retry budget** — tools that fail N times in a row are auto-disabled and the LLM is told. | **重试预算** —— 连续失败 N 次的工具自动禁用并通知 LLM。 |
 | **MCP support** — connect any MCP server with one line: `mcp.register("server", ["cmd"])`. | **MCP 插件** —— 一行接入任意 MCP server:`mcp.register("server", ["cmd"])`。 |
+| **Cross-session memory** — append-only facts log + KV preferences + pluggable vector backend (`naive` BM25-ish / `chroma` / `mock`); auto-recall injects relevant memories into the system prompt. | **跨会话记忆** —— 只追加事实日志 + KV 偏好 + 可插拔向量后端(`naive` BM25 / `chroma` / `mock`);自动召回相关记忆注入系统提示词。 |
+| **Skills + signed marketplace** — Anthropic-compatible SKILL.md bundles, on-demand load, multi-version + pin, atomic install from `git+`/https/local with sha256 + Ed25519 signature checks. | **Skill + 签名市场** —— 兼容 Anthropic SKILL.md,按需加载,多版本+pin,从 `git+`/https/本地原子安装,带 sha256 + Ed25519 签名校验。 |
+| **Streaming + Ctrl-C cancel** — every adapter exposes `.stream()`; the kernel honours a `cancel_event` flag and unwinds cleanly without breaking the tool_use ↔ tool_result contract. | **流式输出 + Ctrl-C 中断** —— 每个 adapter 都实现 `.stream()`;内核遵守 `cancel_event` 标志,优雅退出且不破坏 tool_use ↔ tool_result 契约。 |
 
 ---
 
@@ -673,6 +676,53 @@ sync_skills()            # walks the lockfile, reinstalls each entry
 
 Runnable demo: [`examples/08_skill_market.py`](examples/08_skill_market.py).
 
+#### Demo signed skill repo / 示范签名 skill 仓库
+
+A push-ready, signed catalogue lives in [`./mega-skills/`](./mega-skills/)
+and can be split off to its own GitHub remote (e.g.
+`github.com/wangxfholly/mega-skills`):
+
+```
+mega-skills/
+  skills/
+    csv-analyst/      ← profile any CSV
+    log-summarizer/   ← bucket a log into severity + top error templates
+  keys/
+    dev_signing_key.pub   ← ship me to consumers
+    dev_signing_key.pem   ← .gitignore'd; sign with me
+  tools/
+    gen_signing_key.py    ← Ed25519 keygen
+    sign_skills.py        ← (re)sign every SKILL.md
+```
+
+**Consumer workflow:**
+
+```python
+import pathlib, shutil, urllib.request
+from mega_agent import install_skill
+
+# 1. trust the publisher's key (once per machine)
+trusted = pathlib.Path.home() / ".mega" / "trusted_keys"
+trusted.mkdir(parents=True, exist_ok=True)
+shutil.copy("mega-skills/keys/dev_signing_key.pub",
+            trusted / "mega-skills.pub")
+
+# 2. install + force signature verification
+install_skill("./mega-skills/skills/csv-analyst",
+              require_signature=True, allow_unsigned=False)
+```
+
+**Publisher workflow:**
+
+```bash
+cd mega-skills
+python tools/gen_signing_key.py   # once
+# edit any skills/<name>/SKILL.md and bump version: x.y.z
+python tools/sign_skills.py       # detached Ed25519 over SKILL.md
+git add . && git commit -m "..."
+git push
+```
+
 ---
 
 ## ⚙️ Configuration reference / 配置参考
@@ -708,8 +758,30 @@ Runnable demo: [`examples/08_skill_market.py`](examples/08_skill_market.py).
 | `/rm-route <key>` | Drop a route | 删除路由 |
 | `/perm auto\|strict` | Toggle permission mode | 切换权限模式 |
 | `/backend anthropic\|gateway\|mock` | Override backend for new clients | 覆盖新客户端的后端 |
+| `/skills` | List discovered + installed skills (with pin/auto markers) | 查看已发现/已安装 skill |
+| `/install <src> [sha256]` | Install a skill from `git+<url>`, `https://...tar.gz`, or local path | 从 git/URL/本地安装 skill |
+| `/remove <name>[@version]` | Uninstall (optionally one version only) | 卸载 skill(可指定版本) |
+| `/pin <name> [version]` | Pin to a version, or omit to unpin | 锁定/解锁版本 |
+| `/verify [name]` | Re-hash on-disk vs lockfile (drift / tamper check) | 重新校验磁盘与锁文件 |
+| `/sync` | Reproduce installs from `~/.mega/skills.lock.json` | 按锁文件复现安装 |
+| `/stream on\|off` | Toggle live token streaming for the next turn (default: on) | 切换流式输出 |
 | `@<route> <prompt>` | Dispatch this turn through a route | 此轮按路由派发 |
 | `/quit` | Exit | 退出 |
+
+> **Streaming + Ctrl-C / 流式与中断**: when `/stream on` (default), the
+> kernel uses `LLMClient.stream()` and prints tokens as they arrive.
+> Pressing **Ctrl-C** during a turn flips a `cancel_event`; the kernel
+> finishes its current step (so any in-flight tool_use → tool_result
+> pairing stays consistent), appends a synthetic `[cancelled by user]`
+> assistant block, and returns control to the prompt — no stack trace,
+> no zombie tool calls. Embed the same hook in your own driver:
+>
+> ```python
+> import threading
+> ev = threading.Event()
+> agent_loop("long task...", on_text=print, cancel_event=ev)
+> # ev.set() from another thread / signal handler aborts cleanly
+> ```
 
 ### Runtime files (all in `.gitignore`) / 运行时文件(全部已在 `.gitignore`)
 

@@ -10,6 +10,9 @@ anything from here.
 from __future__ import annotations
 
 import os
+import signal
+import sys
+import threading
 
 from .background import cron
 from .config import MODELS_ENC_FILE, MODELS_FILE, REPO_ROOT, WORKDIR
@@ -18,6 +21,14 @@ from .llm import LLMClient, make_llm_client
 from .mcp import mcp
 from .permissions import permissions
 from .profiles import profiles, secrets
+from .skill_market import (
+    install as install_skill,
+    list_installed as list_installed_skills,
+    remove as remove_skill,
+    sync as sync_skills,
+    verify_installed as verify_installed_skill,
+)
+from .skills import skills
 from .tools import TOOL_HANDLERS
 
 
@@ -37,10 +48,14 @@ def main():
     print("commands  : /profiles  /use <name>  /add-profile  /rm-profile <name>")
     print("            /routes  /route <name> <profile>  /rm-route <name>")
     print("            /perm <auto|strict>  /backend <anthropic|gateway|mock>  /quit")
+    print("skills    : /skills  /install <src> [sha256]  /remove <name>[@version]")
+    print("            /pin <name> [version]  /verify [name]  /sync")
+    print("streaming : /stream <on|off>  (Ctrl-C during a turn cancels it)")
     print("syntax    : '@<route> <prompt>'  → run with routed model")
 
     cron.start()
     llm: LLMClient | None = None
+    streaming = True   # default-on for interactive REPL
 
     while True:
         try:
@@ -123,6 +138,82 @@ def main():
             print(f"llm backend = {os.environ['AGENT_LLM_BACKEND']}")
             continue
 
+        # ---- skills marketplace ----
+        if line == "/skills":
+            cat = skills.catalog()
+            pins = skills._load_pins()
+            if not cat:
+                print("  (no skills discovered) — install one with /install <src>")
+            for s in cat:
+                pinned = f" [pinned→{pins[s['name']]}]" if s["name"] in pins else ""
+                auto = " [auto]" if s.get("auto_load") else ""
+                print(f"  {s['name']:24s} v{s.get('version','?'):10s} "
+                      f"{s.get('description','')[:60]}{pinned}{auto}")
+            continue
+        if line.startswith("/install "):
+            parts = line.split(maxsplit=2)
+            src = parts[1]
+            sha = parts[2].strip() if len(parts) > 2 else None
+            try:
+                rec = install_skill(src, sha256=sha)
+                print(f"installed {rec['name']}@{rec['version']} "
+                      f"(tree_sha={rec.get('tree_sha256','?')[:10]}…)")
+            except Exception as e:
+                print(f"[install failed] {e}")
+            continue
+        if line.startswith("/remove "):
+            arg = line.split(maxsplit=1)[1].strip()
+            name, _, version = arg.partition("@")
+            try:
+                res = remove_skill(name, version=version or None)
+                print(f"removed: {res['removed'] or '(nothing matched)'}")
+            except Exception as e:
+                print(f"[remove failed] {e}")
+            continue
+        if line.startswith("/pin "):
+            parts = line.split(maxsplit=2)
+            name = parts[1]
+            version = parts[2].strip() if len(parts) > 2 else None
+            try:
+                pins = skills.pin(name, version)
+                if name in pins:
+                    print(f"pin: {name} → v{pins[name]}")
+                else:
+                    print(f"pin: {name} → (unpinned)")
+            except Exception as e:
+                print(f"[pin failed] {e}")
+            continue
+        if line == "/verify" or line.startswith("/verify "):
+            name = (line.split(maxsplit=1)[1].strip()
+                    if line.startswith("/verify ") else None)
+            try:
+                res = verify_installed_skill(name)
+                if not res:
+                    print("  (nothing installed)")
+                for n, info in res.items():
+                    mark = "✓" if info.get("ok") else "✗"
+                    print(f"  {mark} {n}: {info}")
+            except Exception as e:
+                print(f"[verify failed] {e}")
+            continue
+        if line == "/sync":
+            try:
+                res = sync_skills()
+                print(f"  installed: {res['installed']}")
+                print(f"  skipped  : {res['skipped']}")
+                if res["errors"]:
+                    print(f"  errors   : {res['errors']}")
+            except Exception as e:
+                print(f"[sync failed] {e}")
+            continue
+        if line.startswith("/stream"):
+            arg = (line.split(maxsplit=1)[1].strip().lower()
+                   if " " in line else "")
+            if arg in ("on", "off"):
+                streaming = (arg == "on")
+            print(f"streaming = {'on' if streaming else 'off'}")
+            continue
+
         # ---- inference (optional `@route` prefix) ----
         route = None
         prompt = line
@@ -135,14 +226,42 @@ def main():
             if not route:
                 llm = current
             print(f"[llm] {current.backend} / {getattr(current, 'model', '?')}"
-                  + (f" via route '{route}'" if route else ""))
-            msgs = agent_loop(prompt, llm=current)
-            last = msgs[-1]["content"]
-            if isinstance(last, list):
-                for b in last:
-                    if getattr(b, "type", None) == "text":
-                        print("agent>", getattr(b, "text", ""))
-            else:
-                print("agent>", last)
+                  + (f" via route '{route}'" if route else "")
+                  + (" [stream]" if streaming else ""))
+
+            cancel_event = threading.Event()
+
+            def _on_sigint(signum, frame):
+                cancel_event.set()
+                # Give the user immediate feedback; do NOT raise — let the
+                # kernel finish its current step and unwind cleanly.
+                sys.stderr.write("\n[Ctrl-C: cancelling current turn…]\n")
+                sys.stderr.flush()
+
+            prev_handler = signal.getsignal(signal.SIGINT)
+            try:
+                signal.signal(signal.SIGINT, _on_sigint)
+                if streaming:
+                    sys.stdout.write("agent> ")
+                    sys.stdout.flush()
+                    def _emit(chunk: str):
+                        sys.stdout.write(chunk)
+                        sys.stdout.flush()
+                    msgs = agent_loop(prompt, llm=current,
+                                      on_text=_emit,
+                                      cancel_event=cancel_event)
+                    sys.stdout.write("\n")
+                else:
+                    msgs = agent_loop(prompt, llm=current,
+                                      cancel_event=cancel_event)
+                    last = msgs[-1]["content"]
+                    if isinstance(last, list):
+                        for b in last:
+                            if getattr(b, "type", None) == "text":
+                                print("agent>", getattr(b, "text", ""))
+                    else:
+                        print("agent>", last)
+            finally:
+                signal.signal(signal.SIGINT, prev_handler)
         except Exception as e:
             print(f"[mega_agent error] {e}")

@@ -4,16 +4,25 @@ mega_agent.kernel
 
 The agent main loop. Pure orchestration — no vendor SDKs and no
 file IO beyond what tools / hooks already do.
+
+Streaming + cancellation
+------------------------
+Pass ``on_text=callback`` to receive incremental text chunks (the kernel
+will use ``llm.stream()`` instead of ``llm.complete()``). Pass
+``cancel_event=threading.Event()`` to abort cleanly: the kernel checks
+the flag between iterations, between stream chunks, and after each
+tool call. On cancellation it appends a synthetic
+``CancelledError: cancelled by user`` text block and returns.
 """
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 
 from .background import notify_q
 from .config import MAX_LOOP_ITERS
 from .hooks import build_system_prompt, hooks
-from .llm import LLMClient, make_llm_client
+from .llm import LLMClient, LLMResponse, TextBlock, make_llm_client
 from .mcp import mcp
 from .permissions import permissions
 from .retry import retry_budget
@@ -64,12 +73,52 @@ def _exec_tool(name: str, tool_input: dict) -> tuple[bool, Any, dict]:
         return False, f"ERROR: {e}", intent
 
 
+def _is_cancelled(cancel_event) -> bool:
+    return cancel_event is not None and cancel_event.is_set()
+
+
+def _consume_stream(llm: LLMClient, *, system: str, tools: list[dict],
+                    messages: list[dict], on_text: Callable[[str], None] | None,
+                    cancel_event) -> tuple[LLMResponse, bool]:
+    """Drive llm.stream(); deliver text chunks; honor cancellation.
+
+    Returns (response, cancelled). If cancelled mid-stream the response
+    contains whatever text was accumulated so far and stop_reason="end_turn".
+    """
+    text_buf: list[str] = []
+    final: LLMResponse | None = None
+    for kind, payload in llm.stream(system=system, tools=tools,
+                                    messages=messages):
+        if _is_cancelled(cancel_event):
+            return (LLMResponse(
+                content=[TextBlock(text="".join(text_buf))],
+                stop_reason="end_turn",
+            ), True)
+        if kind == "text":
+            text_buf.append(payload)
+            if on_text:
+                on_text(payload)
+        elif kind == "done":
+            final = payload
+            break
+    if final is None:
+        # Adapter ended without a "done" frame; synthesize one.
+        final = LLMResponse(
+            content=[TextBlock(text="".join(text_buf))],
+            stop_reason="end_turn",
+        )
+    return final, False
+
+
 def agent_loop(user_prompt: str, *, role: str = "lead",
                llm: LLMClient | None = None,
                route: str | None = None,
-               recall_k: int = 5) -> list[dict]:
+               recall_k: int = 5,
+               on_text: Callable[[str], None] | None = None,
+               cancel_event=None) -> list[dict]:
     """
-    Main loop. Talks to LLM strictly through `LLMClient.complete()`.
+    Main loop. Talks to LLM strictly through `LLMClient.complete()`
+    (or `.stream()` when ``on_text`` is supplied).
     Returns the full message history (last item contains the final answer).
     """
     llm = llm or make_llm_client(route=route)
@@ -79,18 +128,30 @@ def agent_loop(user_prompt: str, *, role: str = "lead",
     )
     messages: list[dict] = [{"role": "user", "content": user_prompt}]
 
+    cancelled = False
     for i in range(MAX_LOOP_ITERS):
+        if _is_cancelled(cancel_event):
+            cancelled = True
+            break
         hooks.emit("loop.iter", iter=i, backend=llm.backend)
 
         pending = _drain_pending_messages()
         if pending:
             messages.append({"role": "user", "content": "\n".join(pending)})
 
-        resp = llm.complete(
-            system=sys_prompt, tools=tools,
-            messages=messages, max_tokens=4096,
-        )
+        if on_text is not None:
+            resp, cancelled = _consume_stream(
+                llm, system=sys_prompt, tools=tools, messages=messages,
+                on_text=on_text, cancel_event=cancel_event,
+            )
+        else:
+            resp = llm.complete(
+                system=sys_prompt, tools=tools,
+                messages=messages, max_tokens=4096,
+            )
         messages.append({"role": "assistant", "content": resp.content})
+        if cancelled:
+            break
 
         if resp.stop_reason != "tool_use":
             break
@@ -98,6 +159,17 @@ def agent_loop(user_prompt: str, *, role: str = "lead",
         results = []
         for block in resp.content:
             if getattr(block, "type", None) != "tool_use":
+                continue
+            if _is_cancelled(cancel_event):
+                cancelled = True
+                # Mark remaining tool calls as cancelled so the API
+                # contract (every tool_use needs a tool_result) holds.
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": "CANCELLED by user",
+                    "is_error": True,
+                })
                 continue
             ok, raw, intent = _exec_tool(block.name, block.input)
             results.append({
@@ -107,5 +179,12 @@ def agent_loop(user_prompt: str, *, role: str = "lead",
                 "is_error": not ok,
             })
         messages.append({"role": "user", "content": results})
+        if cancelled:
+            break
 
+    if cancelled:
+        messages.append({
+            "role": "assistant",
+            "content": [TextBlock(text="[cancelled by user]")],
+        })
     return messages

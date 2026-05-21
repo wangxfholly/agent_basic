@@ -122,3 +122,52 @@ class GatewayAdapter(LLMClient):
             else "end_turn"
         )
         return LLMResponse(content=blocks, stop_reason=stop_reason)
+
+    def stream(self, *, system, tools, messages, max_tokens=4096):
+        """OpenAI Chat Completions streaming. Tool_calls are accumulated
+        across chunks; only complete tool calls are emitted at the end."""
+        oai_msgs = self._to_openai_messages(system, messages)
+        oai_tools = self._to_openai_tools(tools) if tools else None
+        stream = self.client.chat.completions.create(
+            model=self.model, messages=oai_msgs, tools=oai_tools,
+            max_tokens=max_tokens, stream=True,
+        )
+        text_buf: list[str] = []
+        tool_buf: dict[int, dict] = {}  # index → {id, name, args_str}
+        finish_reason = None
+        for chunk in stream:
+            choice = chunk.choices[0]
+            delta = choice.delta
+            if getattr(delta, "content", None):
+                text_buf.append(delta.content)
+                yield ("text", delta.content)
+            for tc in (getattr(delta, "tool_calls", None) or []):
+                idx = tc.index
+                slot = tool_buf.setdefault(idx, {"id": "", "name": "", "args": ""})
+                if tc.id:
+                    slot["id"] = tc.id
+                fn = getattr(tc, "function", None)
+                if fn:
+                    if getattr(fn, "name", None):
+                        slot["name"] = fn.name
+                    if getattr(fn, "arguments", None):
+                        slot["args"] += fn.arguments
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+        blocks: list = []
+        joined = "".join(text_buf)
+        if joined:
+            blocks.append(TextBlock(text=joined))
+        for idx in sorted(tool_buf):
+            slot = tool_buf[idx]
+            try:
+                args = json.loads(slot["args"] or "{}")
+            except json.JSONDecodeError:
+                args = {"_raw": slot["args"]}
+            blocks.append(ToolUseBlock(id=slot["id"], name=slot["name"], input=args))
+        stop_reason = (
+            "tool_use" if finish_reason == "tool_calls"
+            else "max_tokens" if finish_reason == "length"
+            else "end_turn"
+        )
+        yield ("done", LLMResponse(content=blocks, stop_reason=stop_reason))
