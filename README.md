@@ -679,8 +679,8 @@ Runnable demo: [`examples/08_skill_market.py`](examples/08_skill_market.py).
 #### Demo signed skill repo / 示范签名 skill 仓库
 
 A push-ready, signed catalogue lives in [`./mega-skills/`](./mega-skills/)
-and can be split off to its own GitHub remote (e.g.
-`github.com/wangxfholly/mega-skills`):
+and is mirrored at
+[github.com/wangxfholly/mega-skills](https://github.com/wangxfholly/mega-skills):
 
 ```
 mega-skills/
@@ -704,12 +704,18 @@ from mega_agent import install_skill
 # 1. trust the publisher's key (once per machine)
 trusted = pathlib.Path.home() / ".mega" / "trusted_keys"
 trusted.mkdir(parents=True, exist_ok=True)
-shutil.copy("mega-skills/keys/dev_signing_key.pub",
-            trusted / "mega-skills.pub")
+urllib.request.urlretrieve(
+    "https://raw.githubusercontent.com/wangxfholly/mega-skills/main/keys/dev_signing_key.pub",
+    trusted / "mega-skills.pub",
+)
 
-# 2. install + force signature verification
-install_skill("./mega-skills/skills/csv-analyst",
+# 2. install via git+ (depth-1 clone, sha tracked in lockfile)
+install_skill("git+https://github.com/wangxfholly/mega-skills",
               require_signature=True, allow_unsigned=False)
+
+# …or from a local checkout:
+# install_skill("./mega-skills/skills/csv-analyst",
+#               require_signature=True, allow_unsigned=False)
 ```
 
 **Publisher workflow:**
